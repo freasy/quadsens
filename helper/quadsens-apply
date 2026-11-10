@@ -1,0 +1,67 @@
+#!/usr/bin/python3 -I
+"""Privileged helper for QuadSens: write four directional scale values to yeetmouse.
+
+Usage: quadsens-apply XPOS XNEG YPOS YNEG
+
+Meant to be run through pkexec. It accepts exactly four plain decimal numbers
+between 0.1 and 10, writes them to the four fixed DirScale* parameter files and
+then writes 1 to "update". It takes no options, reads no environment and never
+touches any other path.
+"""
+
+import os
+import re
+import sys
+
+PARAMS_DIR = "/sys/module/yeetmouse/parameters"
+PARAM_NAMES = ("DirScaleXPos", "DirScaleXNeg", "DirScaleYPos", "DirScaleYNeg")
+SCALE_MIN = 0.1
+SCALE_MAX = 10.0
+# Digits with an optional fraction only: no sign, exponent, whitespace, nan or inf.
+_NUMBER = re.compile(r"[0-9]{1,2}(\.[0-9]{1,9})?")
+
+
+def parse_args(args: list[str]) -> list[str]:
+    """Return the four values as normalised decimal strings or raise ValueError."""
+    if len(args) != 4:
+        raise ValueError("expected exactly four values (XPos XNeg YPos YNeg)")
+    result = []
+    for name, text in zip(PARAM_NAMES, args):
+        if not isinstance(text, str) or _NUMBER.fullmatch(text) is None:
+            raise ValueError("%s: not a plain decimal number" % name)
+        value = float(text)
+        if not SCALE_MIN <= value <= SCALE_MAX:
+            raise ValueError("%s: outside %s..%s" % (name, SCALE_MIN, SCALE_MAX))
+        result.append("%.6f" % value)
+    return result
+
+
+def _write(path: str, text: str) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+    try:
+        os.write(fd, text.encode("ascii"))
+    finally:
+        os.close(fd)
+
+
+def main(args: list[str], params_dir: str = PARAMS_DIR) -> int:
+    try:
+        values = parse_args(args)
+    except ValueError as exc:
+        print("quadsens-apply: %s" % exc, file=sys.stderr)
+        return 2
+    if not os.path.isdir(params_dir):
+        print("quadsens-apply: yeetmouse module is not loaded", file=sys.stderr)
+        return 3
+    try:
+        for name, value in zip(PARAM_NAMES, values):
+            _write(os.path.join(params_dir, name), value + "\n")
+        _write(os.path.join(params_dir, "update"), "1\n")
+    except OSError as exc:
+        print("quadsens-apply: write failed: %s" % exc, file=sys.stderr)
+        return 4
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

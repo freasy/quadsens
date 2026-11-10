@@ -1,0 +1,21 @@
+# udev rules for the virtual HID mouse created by QuadSens.
+#
+# Access is granted through GROUP="input" + MODE="0660" (the desktop user must
+# be a member of group "input"). TAG+="uaccess" is added as well, but note that
+# the uaccess ACL is applied by 73-seat-late.rules, so in a file numbered 99 the
+# tag only takes effect if an earlier rule already tagged the device. The
+# group/mode assignment is what this file relies on.
+
+# (a) Let the logged-in user open /dev/uhid, the kernel interface used to create
+#     the virtual HID device. static_node makes the permission stick even while
+#     the uhid module is not loaded yet.
+KERNEL=="uhid", SUBSYSTEM=="misc", GROUP="input", MODE="0660", TAG+="uaccess", OPTIONS+="static_node=uhid"
+
+# (b) Make the hidraw node(s) of the virtual device user-accessible, so that
+#     Wine/Proton (and browsers using WebHID) can open them. The match is limited
+#     to devices created through uhid (DEVPATH under /devices/virtual/misc/uhid)
+#     whose HID id is bus 0003 (USB), vendor 1B1C (Corsair), i.e. a kernel name
+#     like "0003:1B1C:2B43.004A" (HID_ID=0003:00001B1C:00002B43). The product id
+#     is left open so that other product ids keep working; real Corsair
+#     hardware on USB is not affected because it does not live under uhid.
+SUBSYSTEM=="hidraw", KERNEL=="hidraw*", DEVPATH=="/devices/virtual/misc/uhid/*", KERNELS=="0003:1B1C:*", GROUP="input", MODE="0660", TAG+="uaccess"
