@@ -33,7 +33,7 @@ class ProtocolTest(unittest.TestCase):
 
     # ---- session ---------------------------------------------------------
 
-    def test_session_start_aimlabs_layout(self) -> None:
+    def test_session_start_reply_layout(self) -> None:
         token = struct.pack("<I", 1793800000)
         res = self.call(su.CMD_SESSION, b"\x01" + token, session=0)
         # Header: sub device, error code 0, request session echoed, command, status.
