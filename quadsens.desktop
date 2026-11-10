@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=QuadSens
+GenericName=Directional mouse sensitivity
+Comment=Carry a per-direction mouse sensitivity calibration into the yeetmouse driver
+Exec=quadsens
+Icon=input-mouse
+Terminal=false
+Categories=Utility;Settings;HardwareSettings;
+Keywords=mouse;sensitivity;calibration;yeetmouse;
+StartupWMClass=quadsens
