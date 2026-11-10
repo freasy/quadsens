@@ -13,6 +13,7 @@ import enum
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,13 +54,19 @@ def format_value(value: float) -> str:
 
 
 def find_helper() -> Path | None:
-    """Locate the pkexec helper: system install first, then the source checkout."""
+    """Locate the pkexec helper: system install first, then the source checkout.
+
+    A packaged binary unpacks itself into a temporary, user-writable directory.
+    Nothing from there may be run as root, so the frozen build only accepts a
+    helper that was installed system-wide.
+    """
     candidates = [
         Path("/usr/local/libexec") / HELPER_NAME,
         Path("/usr/libexec") / HELPER_NAME,
         Path("/usr/lib/quadsens") / HELPER_NAME,
-        Path(__file__).resolve().parent.parent / "helper" / HELPER_NAME,
     ]
+    if not getattr(sys, "frozen", False):
+        candidates.append(Path(__file__).resolve().parent.parent / "helper" / HELPER_NAME)
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate

@@ -7,6 +7,8 @@ name = "quadsens"
 version = "0.1.0"
 description = "Desktop bridge that carries a per-direction mouse sensitivity calibration into the yeetmouse driver"
 readme = "README.md"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = ["PySide6>=6.5"]
 
