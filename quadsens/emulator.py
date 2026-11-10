@@ -518,6 +518,16 @@ BUS_USB = 0x03
 RTYPE_NAMES: dict[int, str] = {0: "feature", 1: "output", 2: "input"}
 
 
+def uhid_access(path: str = UHID_PATH) -> str:
+    """Whether the uhid node can be opened: "ok", "missing" or "denied".
+
+    Only looks at the permissions; nothing is opened and no device is created.
+    """
+    if not os.path.exists(path):
+        return "missing"
+    return "ok" if os.access(path, os.R_OK | os.W_OK) else "denied"
+
+
 def build_create2(name: str, phys: str, uniq: str, vendor: int, product: int,
                   version: int, descriptor: bytes) -> bytes:
     return struct.pack("<I128s64s64sHHIIII", UHID_CREATE2,

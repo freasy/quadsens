@@ -109,6 +109,36 @@ def driver_scalars(firmware: Scalars, flip_y: bool = False) -> Scalars:
     return firmware.flipped_y() if flip_y else firmware
 
 
+def _fixed_prefix(pattern: str) -> str:
+    """The directory part of ``pattern`` in front of its first wildcard."""
+    for index, char in enumerate(pattern):
+        if char in "*?[":
+            return os.path.dirname(pattern[:index])
+    return os.path.dirname(pattern)
+
+
+def result_folder(pattern: str = DEFAULT_GLOB) -> Path | None:
+    """The folder to show the user: where the newest result file lives.
+
+    Without a result file it is the wildcard-free part of the pattern, provided
+    that directory exists; otherwise None.
+    """
+    latest = find_latest(pattern)
+    if latest is not None:
+        return latest.parent
+    prefix = _fixed_prefix(pattern)
+    return Path(prefix) if prefix and os.path.isdir(prefix) else None
+
+
+def display_path(path: str | os.PathLike[str]) -> str:
+    """``path`` with the home directory abbreviated to "~"."""
+    text = str(path)
+    home = os.path.expanduser("~")
+    if home not in ("", "/") and (text == home or text.startswith(home + os.sep)):
+        return "~" + text[len(home):]
+    return text
+
+
 def watch_paths(pattern: str = DEFAULT_GLOB) -> list[str]:
     """Paths to watch so that new or replaced calibration files are noticed.
 
@@ -119,13 +149,7 @@ def watch_paths(pattern: str = DEFAULT_GLOB) -> list[str]:
     for name in glob.glob(pattern):
         paths.add(name)
         paths.add(os.path.dirname(name))
-    prefix = pattern
-    for index, char in enumerate(pattern):
-        if char in "*?[":
-            prefix = os.path.dirname(pattern[:index])
-            break
-    else:
-        prefix = os.path.dirname(pattern)
+    prefix = _fixed_prefix(pattern)
     while prefix and not os.path.isdir(prefix):
         parent = os.path.dirname(prefix)
         if parent == prefix:

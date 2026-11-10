@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quadsens"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Desktop bridge that carries a per-direction mouse sensitivity calibration into the yeetmouse driver"
 readme = "README.md"
 license = "GPL-3.0-or-later"
@@ -17,6 +17,14 @@ quadsens = "quadsens.__main__:main"
 
 [tool.setuptools]
 packages = ["quadsens", "quadsens.ui"]
+
+[tool.setuptools.dynamic]
+version = {attr = "quadsens.__version__"}
+
+# Icon and menu entry, so that an installed copy shows up in the desktop menu.
+[tool.setuptools.data-files]
+"share/icons/hicolor/scalable/apps" = ["assets/quadsens.svg"]
+"share/applications" = ["quadsens.desktop"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

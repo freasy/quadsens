@@ -136,12 +136,19 @@ class Driver:
         self._check(scalars)
         helper = self._helper if self._helper is not None else find_helper()
         if helper is None or not Path(helper).is_file():
-            raise DriverError(f"helper script {HELPER_NAME} not found")
+            raise DriverError(
+                f"helper script {HELPER_NAME} not found. Join group yeetmouse to write "
+                "without it, or install it system-wide (see README.md)")
         pkexec = shutil.which(self.pkexec)
         if pkexec is None:
             raise DriverError("pkexec is not installed; cannot write root-only parameters")
         return [pkexec, str(Path(helper).resolve()),
                 *(format_value(v) for v in scalars.as_tuple())]
+
+    def helper_installed(self) -> bool:
+        """Whether the pkexec fallback has a helper script it may run."""
+        helper = self._helper if self._helper is not None else find_helper()
+        return helper is not None and Path(helper).is_file()
 
     def write(self, scalars: Scalars, runner: Runner = subprocess.run) -> str:
         """Write directly, falling back to pkexec. Returns "direct" or "pkexec".

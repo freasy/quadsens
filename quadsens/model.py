@@ -3,10 +3,31 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 
 SCALE_MIN = 0.1
 SCALE_MAX = 10.0
+
+# Digits with at most one separator, "." or ",": no sign, grouping or exponent.
+_DECIMAL = re.compile(r"[0-9]+(?:[.,][0-9]*)?|[.,][0-9]+")
+
+
+def parse_decimal(text: str) -> float | None:
+    """Parse a plain decimal number typed with either "." or "," as the separator.
+
+    Independent of the process locale: "1,0375" and "1.0375" are the same number
+    everywhere. Returns None for anything else (signs, exponents, "1.000,5").
+    """
+    text = text.strip()
+    if _DECIMAL.fullmatch(text) is None:
+        return None
+    return float(text.replace(",", "."))
+
+
+def format_decimal(value: float, decimals: int) -> str:
+    """Fixed-point text with a dot, whatever the locale."""
+    return f"{value:.{decimals}f}"
 
 
 @dataclass(frozen=True)

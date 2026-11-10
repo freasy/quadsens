@@ -1,7 +1,9 @@
 #!/bin/sh
 # Build a single-file QuadSens binary into dist/quadsens.
 # Needs Python 3.10+ with the venv module; everything else is fetched from PyPI
-# into ./.venv (no root, nothing installed system-wide).
+# into ./.venv (no root, nothing installed system-wide). The icon is bundled as
+# data (found at run time through quadsens/resources.py); PySide6.QtSvg is
+# named explicitly so that Qt's SVG icon plugin and its library are included.
 set -eu
 cd "$(dirname "$0")"
 PYTHON="${PYTHON:-python3}"
@@ -9,5 +11,6 @@ PYTHON="${PYTHON:-python3}"
 .venv/bin/pip install --quiet --disable-pip-version-check "PySide6-Essentials>=6.5" pyinstaller
 .venv/bin/pyinstaller --noconfirm --clean --onefile --windowed --name quadsens \
     --paths . --exclude-module PyQt6 --exclude-module tkinter \
+    --add-data assets/quadsens.svg:assets --hidden-import PySide6.QtSvg \
     packaging/entry.py
 echo "Built: $(pwd)/dist/quadsens"
