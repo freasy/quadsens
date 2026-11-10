@@ -13,16 +13,20 @@ from ..driver import (
     DriverStatus,
     describe_helper_failure,
 )
+from ..hints import PERSIST, driver_status
 from ..model import SCALE_MAX, SCALE_MIN, Scalars
 from .qt import QtCore, QtWidgets
-from .status import MessageLabel
+from .scale_spin import ScaleSpinBox
+from .status import MessageLabel, WrapLabel
 
 # Mouse direction each parameter scales; the driver's +Y is "down".
-ROW_TITLES: tuple[str, ...] = (
-    "DirScaleXPos (&right):", "DirScaleXNeg (l&eft):",
-    "DirScaleYPos (&down):", "DirScaleYNeg (&up):")
+DIRECTIONS: tuple[str, ...] = ("right", "left", "down", "up")
+ROW_TITLES: tuple[str, ...] = ("→ &Right:", "← &Left:", "↓ &Down:", "↑ &Up:")
 NO_VALUE = "–"
 DECIMALS = 4
+# Half a step of the last digit shown: closer than this is "the same value".
+SAME_VALUE = 0.5 * 10 ** -DECIMALS + 1e-9
+CHANGED_MARK = "≠"
 
 
 class DriverPanel(QtWidgets.QGroupBox):
@@ -39,59 +43,86 @@ class DriverPanel(QtWidgets.QGroupBox):
 
         grid = QtWidgets.QGridLayout()
         grid.setHorizontalSpacing(8)
-        for column, title in enumerate(("Parameter", "Driver reports", "New value")):
+        grid.setVerticalSpacing(4)
+        for column, title in enumerate(("Direction", "Driver reports", "New value")):
             header = QtWidgets.QLabel(title)
             font = header.font()
             font.setBold(True)
             header.setFont(font)
             grid.addWidget(header, 0, column)
         self.current_labels: list[QtWidgets.QLabel] = []
-        self.spins: list[QtWidgets.QDoubleSpinBox] = []
-        for row, (title, name) in enumerate(zip(ROW_TITLES, PARAM_NAMES), start=1):
-            spin = QtWidgets.QDoubleSpinBox()
+        self.spins: list[ScaleSpinBox] = []
+        self.change_marks: list[QtWidgets.QLabel] = []
+        for row, (title, name, direction) in enumerate(
+                zip(ROW_TITLES, PARAM_NAMES, DIRECTIONS), start=1):
+            purpose = f"{name}: multiplier for mouse movement to the {direction}" \
+                if direction in ("right", "left") else \
+                f"{name}: multiplier for mouse movement {direction}"
+            spin = ScaleSpinBox()
             spin.setRange(SCALE_MIN, SCALE_MAX)
             spin.setDecimals(DECIMALS)
             spin.setSingleStep(0.001)
             spin.setValue(1.0)
-            spin.setAccessibleName(f"New value for {name}")
+            spin.setAccessibleName(f"New value for {name} ({direction})")
+            spin.setAccessibleDescription(
+                purpose + ". 1 leaves the movement unchanged. Dot or comma as "
+                "decimal separator.")
+            spin.setToolTip(purpose + " (1 = unchanged)")
+            spin.valueChanged.connect(self._update_pending)
             label = QtWidgets.QLabel(title)
             label.setBuddy(spin)
+            label.setToolTip(purpose)
             current = QtWidgets.QLabel(NO_VALUE)
-            current.setAccessibleName(f"Driver reports for {name}")
+            current.setAccessibleName(f"Driver reports for {name} ({direction})")
+            current.setToolTip(f"Value of {name} the loaded module reports")
+            current.setTextInteractionFlags(
+                QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+            mark = QtWidgets.QLabel()
+            mark.setAccessibleName(f"Change marker for {name} ({direction})")
+            mark.setFixedWidth(mark.fontMetrics().horizontalAdvance(CHANGED_MARK) + 2)
             grid.addWidget(label, row, 0)
             grid.addWidget(current, row, 1)
             grid.addWidget(spin, row, 2)
+            grid.addWidget(mark, row, 3)
             self.current_labels.append(current)
             self.spins.append(spin)
+            self.change_marks.append(mark)
         grid.setColumnStretch(2, 1)
 
-        self.use_button = QtWidgets.QPushButton("Use &calibration")
+        self.pending_label = QtWidgets.QLabel()
+        self.pending_label.setAccessibleName("Unsaved changes")
+        self.pending_label.setToolTip(
+            "Whether the new values differ from what the driver reports. " + PERSIST)
+
+        self.use_button = QtWidgets.QPushButton("Use cali&bration")
         self.use_button.setToolTip("Fill the new values from the calibration file")
         self.use_button.clicked.connect(self.use_calibration)
         self.flip_check = QtWidgets.QCheckBox("Flip &Y")
         self.flip_check.setToolTip(
-            "Exchange YPos and YNeg. Use it if up and down feel swapped: the Y sign "
-            "convention of the calibration is not confirmed.")
+            "Exchange the down and up values. Use it if up and down feel swapped "
+            "after applying a calibration.")
         self.flip_check.setChecked(bool(settings.value("driver/flip_y", False, type=bool)))
         self.flip_check.toggled.connect(self._flip_toggled)
         self.reset_button = QtWidgets.QPushButton("Reset to 1.&0")
-        self.reset_button.setToolTip("Set all four new values to 1.0 (no scaling)")
+        self.reset_button.setToolTip(
+            "Set all four new values to 1.0 (no scaling). Apply this before a new "
+            "calibration, so that it measures the unscaled mouse.")
         self.reset_button.clicked.connect(self.reset_values)
-        self.read_button = QtWidgets.QPushButton("Read a&gain")
+        self.read_button = QtWidgets.QPushButton("Read agai&n")
         self.read_button.setToolTip("Read the current values from the driver again")
         self.read_button.clicked.connect(lambda: self.refresh())
         self.apply_button = QtWidgets.QPushButton("&Apply")
-        self.apply_button.setToolTip("Write the new values to the driver")
+        self.apply_button.setToolTip("Write the new values to the driver. " + PERSIST)
         self.apply_button.clicked.connect(self.apply)
 
         buttons = QtWidgets.QGridLayout()
         buttons.addWidget(self.use_button, 0, 0)
-        buttons.addWidget(self.flip_check, 0, 1)
-        buttons.addWidget(self.reset_button, 0, 2)
+        buttons.addWidget(self.reset_button, 0, 1)
         buttons.addWidget(self.read_button, 1, 0)
-        buttons.addWidget(self.apply_button, 1, 2)
+        buttons.addWidget(self.apply_button, 1, 1)
 
-        self.auto_check = QtWidgets.QCheckBox("Apply saved &values on start")
+        self.auto_check = QtWidgets.QCheckBox("Apply sa&ved on start")
+        self.auto_check.setAccessibleName("Apply saved values on start")
         self.auto_check.setToolTip("Write the last applied values to the driver when "
                                    "the application starts")
         self.auto_check.setChecked(
@@ -99,16 +130,25 @@ class DriverPanel(QtWidgets.QGroupBox):
         self.auto_check.toggled.connect(
             lambda checked: settings.setValue("driver/apply_on_start", checked))
 
-        self.status_label = QtWidgets.QLabel()
-        self.status_label.setAccessibleName("Driver status")
-        self.status_label.setWordWrap(True)
+        checks = QtWidgets.QHBoxLayout()
+        checks.addWidget(self.flip_check)
+        checks.addSpacing(8)
+        checks.addWidget(self.auto_check)
+        checks.addStretch(1)
+
+        for control in (self.use_button, self.flip_check, self.reset_button,
+                        self.read_button, self.apply_button, self.auto_check):
+            control.setAccessibleDescription(control.toolTip())
+
+        self.status_label = WrapLabel("Driver status")
         self.message = MessageLabel("Driver message")
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.addWidget(self.status_label)
         layout.addLayout(grid)
+        layout.addWidget(self.pending_label)
         layout.addLayout(buttons)
-        layout.addWidget(self.auto_check)
+        layout.addLayout(checks)
         layout.addWidget(self.message)
         layout.addStretch(1)
 
@@ -140,6 +180,21 @@ class DriverPanel(QtWidgets.QGroupBox):
     def flip_y(self) -> bool:
         return bool(self.flip_check.isChecked())
 
+    def changed_directions(self) -> list[str]:
+        """Directions whose new value differs from what the driver reports.
+
+        Empty when the driver values are unknown: there is nothing to compare.
+        """
+        reported = self.state.scalars
+        if reported is None:
+            return []
+        return [direction for direction, spin, value
+                in zip(DIRECTIONS, self.spins, reported.as_tuple())
+                if abs(spin.value() - value) > SAME_VALUE]
+
+    def has_unsaved_changes(self) -> bool:
+        return bool(self.changed_directions())
+
     # ---- actions ----------------------------------------------------------
 
     def refresh(self) -> DriverState:
@@ -148,19 +203,37 @@ class DriverPanel(QtWidgets.QGroupBox):
         values = state.scalars.as_tuple() if state.scalars is not None else None
         for index, label in enumerate(self.current_labels):
             label.setText(NO_VALUE if values is None else f"{values[index]:.6f}")
-        if state.status is DriverStatus.OK:
-            text = "Status: values read from the driver."
-        elif state.status is DriverStatus.NOT_LOADED:
-            text = "Status: module not loaded. Load yeetmouse before applying."
-        elif state.status is DriverStatus.NOT_READABLE:
-            text = ("Status: not readable (root-only parameters). Apply will ask for "
-                    "authorization.")
-        elif state.status is DriverStatus.UNSUPPORTED:
-            text = "Status: module loaded, but it has no DirScale parameters (not patched)."
-        else:
-            text = f"Status: error reading the driver ({state.message})."
-        self.status_label.setText(text)
+        self.status_label.setText(driver_status(state, self._driver.helper_installed()))
+        # While everything works, the line below the values says so; the status
+        # line appears when there is something to do about the driver.
+        self.status_label.setVisible(state.status is not DriverStatus.OK)
+        self._update_pending()
         return state
+
+    def _update_pending(self, *_args: object) -> None:
+        """Mark edited rows and enable Apply only when there is something to write."""
+        changed = self.changed_directions()
+        for direction, spin, mark in zip(DIRECTIONS, self.spins, self.change_marks):
+            edited = direction in changed
+            mark.setText(CHANGED_MARK if edited else "")
+            mark.setToolTip("Differs from the value the driver reports" if edited else "")
+            font = spin.font()
+            if font.bold() != edited:
+                font.setBold(edited)
+                spin.setFont(font)
+        font = self.pending_label.font()
+        font.setBold(bool(changed))
+        self.pending_label.setFont(font)
+        if self.state.scalars is None:
+            self.pending_label.setText(
+                "Driver values unknown; Apply writes these.")
+        elif changed:
+            self.pending_label.setText(
+                "%s Unsaved changes: %s" % (CHANGED_MARK, ", ".join(changed)))
+        else:
+            self.pending_label.setText("Driver values read. No unsaved changes.")
+        self.apply_button.setEnabled(
+            self._process is None and (self.state.scalars is None or bool(changed)))
 
     def use_calibration(self) -> None:
         calibration = self._get_calibration()
@@ -187,7 +260,7 @@ class DriverPanel(QtWidgets.QGroupBox):
         self._settings.setValue("driver/flip_y", checked)
         self.set_values(self.values().flipped_y())
         self.message.show_message(
-            "Flip Y %s: the two Y values were exchanged. Press Apply to write them."
+            "Flip Y %s: the down and up values were exchanged. Press Apply to write them."
             % ("on" if checked else "off"))
 
     def apply(self) -> None:
@@ -251,7 +324,7 @@ class DriverPanel(QtWidgets.QGroupBox):
             self._process.deleteLater()
         self._process = None
         self._pending = None
-        self.apply_button.setEnabled(True)
+        self._update_pending()
 
     def _applied(self, scalars: Scalars, how: str) -> None:
         self._settings.setValue("driver/saved_values",
@@ -262,7 +335,8 @@ class DriverPanel(QtWidgets.QGroupBox):
                 f"Applied {how}. The driver values cannot be read back here, so the "
                 "result is not confirmed.")
         elif state.scalars.is_close(scalars):
-            self.message.show_message(f"Applied {how}. The driver reports the new values.")
+            self.message.show_message(
+                f"✓ Applied {how}. The driver reports the new values.")
         else:
             self.message.show_message(
                 f"Written {how}, but the driver reports different values (see "

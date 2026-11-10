@@ -6,6 +6,8 @@ import os
 import signal
 import sys
 
+from . import __version__
+
 
 def default_state_path() -> str:
     base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
@@ -23,12 +25,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     from .calibration import DEFAULT_GLOB
     from .driver import Driver
+    from .ui.icon import app_icon
     from .ui.main_window import MainWindow
 
     app = QtWidgets.QApplication(sys.argv if argv is None else [sys.argv[0], *argv])
     app.setOrganizationName("QuadSens")
     app.setApplicationName("QuadSens")
     app.setDesktopFileName("quadsens")
+    app.setApplicationVersion(__version__)
+    app.setWindowIcon(app_icon())
 
     window = MainWindow(QtCore.QSettings(), DEFAULT_GLOB, Driver(), default_state_path())
     app.aboutToQuit.connect(window.shutdown)

@@ -38,17 +38,63 @@ class StatusDot(QtWidgets.QWidget):
         painter.end()
 
 
-class MessageLabel(QtWidgets.QLabel):
-    """Inline status/error line. Errors are marked by wording and weight, not colour."""
+class WrapLabel(QtWidgets.QLabel):
+    """Plain-text label that wraps, never widens its parent and is never cut off.
+
+    Qt's height-for-width handling does not work through nested layouts: a
+    wrapping label in a group box makes the layouts above it treat preferred
+    heights as minimum heights and squeeze everything. This label therefore
+    opts out of height-for-width and instead claims, as a fixed height, what
+    its text needs at the width it was given.
+    """
 
     def __init__(self, accessible_name: str, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
+        self._needed = self.fontMetrics().height()
         self.setAccessibleName(accessible_name)
         self.setWordWrap(True)
         self.setTextFormat(QtCore.Qt.TextFormat.PlainText)
         self.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
-                           QtWidgets.QSizePolicy.Policy.Preferred)
+                           QtWidgets.QSizePolicy.Policy.Fixed)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 (Qt name)
+        return False
+
+    def sizeHint(self) -> QtCore.QSize:  # noqa: N802 (Qt name)
+        return QtCore.QSize(super().sizeHint().width(), self._needed)
+
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 (Qt name)
+        return QtCore.QSize(0, self._needed)
+
+    def setText(self, text: str) -> None:  # noqa: N802 (Qt name)
+        super().setText(text)
+        self._claim_height()
+
+    def setFont(self, font: QtGui.QFont) -> None:  # noqa: N802 (Qt name)
+        super().setFont(font)
+        self._claim_height()
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802 (Qt name)
+        super().resizeEvent(event)
+        self._claim_height()
+
+    def _claim_height(self) -> None:
+        width = self.width()
+        needed = self.heightForWidth(width) if width > 0 else -1
+        if needed <= 0:
+            needed = self.fontMetrics().height()
+        if needed != self._needed:
+            self._needed = needed
+            self.updateGeometry()
+
+
+class MessageLabel(WrapLabel):
+    """Inline status/error line. Errors are marked by wording and weight, not colour."""
+
+    def __init__(self, accessible_name: str, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(accessible_name, parent)
         self.is_error = False
 
     def show_message(self, text: str, error: bool = False) -> None:

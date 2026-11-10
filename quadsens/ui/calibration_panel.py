@@ -4,8 +4,16 @@ from __future__ import annotations
 
 import time
 
-from ..calibration import Calibration, CalibrationError, find_latest, load, watch_paths
+from ..calibration import (
+    Calibration,
+    CalibrationError,
+    display_path,
+    find_latest,
+    load,
+    watch_paths,
+)
 from ..emulator import DirectionalWrites
+from ..hints import NO_RESULT
 from .compass import CompassWidget
 from .qt import QtCore, QtWidgets, Signal
 from .status import MessageLabel
@@ -29,13 +37,16 @@ class CalibrationPanel(QtWidgets.QGroupBox):
 
         self.path_edit = QtWidgets.QLineEdit()
         self.path_edit.setReadOnly(True)
-        self.path_edit.setPlaceholderText("no calibration file found")
+        self.path_edit.setPlaceholderText("no calibration file found yet")
         self.path_edit.setAccessibleName("Calibration file path")
-        path_label = QtWidgets.QLabel("&File:")
+        self.path_edit.setAccessibleDescription(
+            "The newest calibration result file. It is found and re-read automatically.")
+        path_label = QtWidgets.QLabel("Result f&ile:")
         path_label.setBuddy(self.path_edit)
-        self.refresh_button = QtWidgets.QPushButton("Refres&h")
+        self.refresh_button = QtWidgets.QPushButton("R&efresh")
         self.refresh_button.setAccessibleName("Refresh calibration")
         self.refresh_button.setToolTip("Look for the newest calibration file again")
+        self.refresh_button.setAccessibleDescription(self.refresh_button.toolTip())
         self.refresh_button.clicked.connect(self.refresh)
         self.mtime_label = QtWidgets.QLabel()
         self.mtime_label.setAccessibleName("Calibration file modification time")
@@ -73,7 +84,6 @@ class CalibrationPanel(QtWidgets.QGroupBox):
         grid.addWidget(self.enabled_label, len(ROWS) + 1, 2)
         self.emulator_time_label = QtWidgets.QLabel("No writes this session")
         self.emulator_time_label.setAccessibleName("Time of last write to virtual mouse")
-        self.emulator_time_label.setWordWrap(True)
         grid.addWidget(self.emulator_time_label, len(ROWS) + 2, 0, 1, 3)
         grid.setRowStretch(len(ROWS) + 3, 1)
 
@@ -112,9 +122,9 @@ class CalibrationPanel(QtWidgets.QGroupBox):
                 error = str(exc)
         self.calibration = calibration
 
-        self.path_edit.setText(str(path) if path is not None else "")
+        self.path_edit.setText(display_path(path) if path is not None else "")
         self.path_edit.setCursorPosition(len(self.path_edit.text()))
-        self.path_edit.setToolTip(self.path_edit.text())
+        self.path_edit.setToolTip(str(path) if path is not None else "")
         if calibration is not None:
             self.mtime_label.setText("Modified: " + _stamp(calibration.mtime))
             for _title, key in ROWS:
@@ -132,8 +142,7 @@ class CalibrationPanel(QtWidgets.QGroupBox):
             if error:
                 self.message.show_message(error, error=True)
             else:
-                self.message.show_message(
-                    "No calibration file found. Run the calibration in the game first.")
+                self.message.show_message(NO_RESULT)
         self._rearm_watcher()
         self.calibration_changed.emit()
 
