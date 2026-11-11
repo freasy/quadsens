@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- QuadSens application icon, simplified for 16 and 24 pixels: heavier
+     edge, wider gaps, no centre point. See quadsens.svg for the full drawing.
+     SPDX-License-Identifier: GPL-3.0-or-later -->
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#161618"/>
+      <stop offset="1" stop-color="#0b0b0d"/>
+    </linearGradient>
+    <linearGradient id="red" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#df5c6d"/>
+      <stop offset="0.5" stop-color="#d7263d"/>
+      <stop offset="1" stop-color="#d7263d"/>
+    </linearGradient>
+  </defs>
+  <rect x="2.5" y="2.5" width="59" height="59" rx="14" fill="url(#tile)" stroke="#5a5a63" stroke-width="2.6"/>
+  <path d="M46.92 21.93 A18 18 0 0 1 46.92 42.07" fill="none" stroke="url(#red)" stroke-width="13"/>
+  <path d="M40.95 45.26 A16 16 0 0 1 23.05 45.26" fill="none" stroke="url(#red)" stroke-width="9"/>
+  <path d="M20.19 39.97 A14.25 14.25 0 0 1 20.19 24.03" fill="none" stroke="url(#red)" stroke-width="5.5"/>
+  <path d="M23.47 19.36 A15.25 15.25 0 0 1 40.53 19.36" fill="none" stroke="url(#red)" stroke-width="7.5"/>
+</svg>

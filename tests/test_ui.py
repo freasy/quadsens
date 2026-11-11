@@ -653,6 +653,21 @@ class MainWindowTest(unittest.TestCase):
         self.assertEqual(window.windowTitle(), "QuadSens")
         self.assertFalse(window.windowIcon().isNull())
         self.assertFalse(window.windowIcon().pixmap(32, 32).isNull())
+        # Small sizes come from the simplified drawing, large ones from the full one.
+        from quadsens import resources
+        small = QtGui.QIcon(str(resources.resource_path(resources.ICON_SMALL_FILE)))
+        full = QtGui.QIcon(str(resources.resource_path(resources.ICON_FILE)))
+        icon = window.windowIcon()
+        for size in (16, 24):
+            self.assertEqual(icon.pixmap(size, size).toImage(),
+                             small.pixmap(size, size).toImage(), size)
+            self.assertNotEqual(icon.pixmap(size, size).toImage(),
+                                full.pixmap(size, size).toImage(), size)
+        for size in (32, 64, 256):
+            self.assertEqual(icon.pixmap(size, size).toImage(),
+                             full.pixmap(size, size).toImage(), size)
+        self.assertEqual(sorted({s.width() for s in icon.availableSizes()}),
+                         [16, 24, 32, 48, 64, 128, 256])
         titles = [action.text() for action in window.menuBar().actions()]
         self.assertEqual(titles, ["&File", "View", "&Help"])
         self.assertEqual(ThemeManager.instance().mode(), "quadsens")

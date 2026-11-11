@@ -29,7 +29,8 @@ if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
 & .venv\Scripts\pyinstaller.exe --noconfirm --clean --onefile --windowed --name quadsens `
     --paths . --exclude-module PyQt6 --exclude-module tkinter `
     --icon assets\quadsens.ico `
-    --add-data "assets/quadsens.svg:assets" --hidden-import PySide6.QtSvg `
+    --add-data "assets/quadsens.svg:assets" --add-data "assets/quadsens-small.svg:assets" `
+    --hidden-import PySide6.QtSvg `
     packaging\entry.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 

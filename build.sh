@@ -13,7 +13,8 @@ PYTHON="${PYTHON:-python3}"
 .venv/bin/pip install --quiet --disable-pip-version-check "PySide6-Essentials>=6.5" pyinstaller
 .venv/bin/pyinstaller --noconfirm --clean --onefile --windowed --name quadsens \
     --paths . --exclude-module PyQt6 --exclude-module tkinter \
-    --add-data assets/quadsens.svg:assets --hidden-import PySide6.QtSvg \
+    --add-data assets/quadsens.svg:assets --add-data assets/quadsens-small.svg:assets \
+    --hidden-import PySide6.QtSvg \
     --add-data helper/quadsens-driver.sh:helper \
     packaging/entry.py
 echo "Built: $(pwd)/dist/quadsens"

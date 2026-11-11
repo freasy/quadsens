@@ -12,9 +12,13 @@ import sysconfig
 from pathlib import Path
 
 ICON_FILE = "assets/quadsens.svg"
+# The same icon drawn simpler, for 16 and 24 pixels (title bar, task bar, tray).
+ICON_SMALL_FILE = "assets/quadsens-small.svg"
+SMALL_ICON_UP_TO = 24
 # Where pyproject.toml installs the icon, relative to the installation prefix.
 _INSTALLED = {
     ICON_FILE: "share/icons/hicolor/scalable/apps/quadsens.svg",
+    ICON_SMALL_FILE: "share/quadsens/quadsens-small.svg",
     "helper/quadsens-driver.sh": "share/quadsens/quadsens-driver.sh",
 }
 

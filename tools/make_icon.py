@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Render assets/quadsens.svg into assets/quadsens.ico for the Windows executable.
+"""Render the two icon drawings into assets/quadsens.ico for the Windows executable.
+
+assets/quadsens-small.svg gives the 16 and 24 pixel images, assets/quadsens.svg
+the larger ones.
 
 Usage: python3 tools/make_icon.py
 
 The .ico holds the icon at 16, 24, 32, 48, 64, 128 and 256 pixels, each stored
 as PNG (which Windows reads since Vista). The file is committed, so building
-on Windows does not need this step; run it again after changing the SVG.
+on Windows does not need this step; run it again after changing an SVG.
 """
 
 from __future__ import annotations
@@ -39,10 +42,11 @@ def png_bytes(icon: QtGui.QIcon, size: int) -> bytes:
 def main() -> int:
     app = QtWidgets.QApplication([sys.argv[0]])   # noqa: F841 (needed for rendering)
     icon = QtGui.QIcon(str(ROOT / "assets" / "quadsens.svg"))
-    if icon.pixmap(32, 32).isNull():
+    small = QtGui.QIcon(str(ROOT / "assets" / "quadsens-small.svg"))
+    if icon.pixmap(32, 32).isNull() or small.pixmap(16, 16).isNull():
         print("the SVG could not be rendered (is Qt's SVG plugin installed?)", file=sys.stderr)
         return 1
-    images = [png_bytes(icon, size) for size in SIZES]
+    images = [png_bytes(small if size <= 24 else icon, size) for size in SIZES]
     header = struct.pack("<HHH", 0, 1, len(SIZES))
     offset = len(header) + 16 * len(SIZES)
     entries = b""

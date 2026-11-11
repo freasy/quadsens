@@ -62,6 +62,26 @@ class ResourceTest(unittest.TestCase):
     def test_build_script_bundles_the_icon(self) -> None:
         script = (ROOT / "build.sh").read_text(encoding="utf-8")
         self.assertIn("--add-data assets/quadsens.svg:assets", script)
+        self.assertIn("--add-data assets/quadsens-small.svg:assets", script)
+        windows = (ROOT / "build-windows.ps1").read_text(encoding="utf-8")
+        self.assertIn('--add-data "assets/quadsens-small.svg:assets"', windows)
+        self.assertIn("--icon assets\\quadsens.ico", windows)
+
+    def test_small_drawing_ships_and_the_ico_holds_every_size(self) -> None:
+        import struct
+        small = resources.resource_path(resources.ICON_SMALL_FILE)
+        self.assertEqual(small, ROOT / "assets" / "quadsens-small.svg")
+        text = small.read_text(encoding="utf-8")
+        self.assertIn("<svg", text)
+        self.assertIsNone(BRANDS.search(text))
+        for word in ("<filter", "<text", "<image", "candidate"):
+            self.assertNotIn(word, text)
+            self.assertNotIn(word, (ROOT / "assets" / "quadsens.svg").read_text())
+        data = (ROOT / "assets" / "quadsens.ico").read_bytes()
+        _reserved, kind, count = struct.unpack_from("<HHH", data)
+        self.assertEqual((kind, count), (1, 7))
+        sides = [data[6 + 16 * index] or 256 for index in range(count)]
+        self.assertEqual(sides, [16, 24, 32, 48, 64, 128, 256])
 
     def test_desktop_file_uses_the_icon_and_neutral_names(self) -> None:
         text = (ROOT / "quadsens.desktop").read_text(encoding="utf-8")

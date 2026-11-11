@@ -863,7 +863,8 @@ quadsens/              application package
                        ui/theme.py builds the stylesheet
 helper/quadsens-apply  helper run through pkexec
 helper/quadsens-driver.sh  installs or reverts the fork (fed to pkexec sh)
-assets/quadsens.svg    application icon
+assets/quadsens.svg    application icon (quadsens-small.svg: drawn simpler for 16
+                       and 24 px; quadsens.ico: both, for the Windows executable)
 packaging/entry.py     entry point for the PyInstaller build
 tools/make_screenshot.py
 tests/
