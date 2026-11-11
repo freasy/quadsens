@@ -57,6 +57,7 @@ from json.decoder import scanstring
 from pathlib import Path
 from typing import Any
 
+from . import accel_edit
 from .model import Scalars
 
 SETTINGS_NAME = "settings.json"
@@ -385,6 +386,94 @@ def patch(document: Document, index: int, new: Four) -> str:
     if json.loads(text) != expected:
         raise RawAccelError("settings.json could not be changed safely (the result "
                             "did not match)")
+    return text
+
+
+# ---- acceleration ---------------------------------------------------------------------
+
+
+def accel_text(document: Document, index: int) -> str:
+    """The acceleration arguments of a profile exactly as the file has them.
+
+    Kept as the original before QuadSens first changes them, so that
+    "Restore original" can put the very same text back.
+    """
+    try:
+        start, end = _span(document.text, 0, ["profiles", index, accel_edit.RA_ARGS])
+    except (ValueError, IndexError) as exc:
+        raise RawAccelError(f"settings.json has no acceleration settings there ({exc})") from exc
+    return document.text[start:end]
+
+
+def _literal(value: object) -> str:
+    """A JSON token for a value set by the editor."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return json.dumps(value)
+    number = float(value)                                   # type: ignore[arg-type]
+    if number != number or abs(number) == float("inf"):
+        raise RawAccelError("a computed setting is not a number")
+    return repr(number)
+
+
+def patch_accel(document: Document, index: int, curve: accel_edit.Curve) -> str:
+    """The settings text with the acceleration of one profile set to ``curve``.
+
+    Only the tokens of the values that must change are replaced; every other
+    byte of the file stays. Refused, with nothing changed, when the curve is
+    not allowed, when the profile is currently set to something QuadSens does
+    not edit, or when RawAccel's own check would not accept the result.
+    """
+    profile = document.profile(index)
+    current = accel_edit.classify_rawaccel(profile, document.data)
+    if not current.editable:
+        raise RawAccelError("the profile is set to something QuadSens does not edit. "
+                            + current.reason)
+    try:
+        changes = accel_edit.rawaccel_changes(curve)
+    except accel_edit.AccelError as exc:
+        raise RawAccelError(" ".join(exc.reasons)) from exc
+    args = profile[accel_edit.RA_ARGS]
+    wanted = accel_edit.apply_changes(args, changes)
+    errors = accel_edit.rawaccel_errors(wanted)
+    if errors:
+        raise RawAccelError("RawAccel would not accept these settings: " + "; ".join(errors))
+    text = document.text
+    spans = []
+    try:
+        for path, value in changes.items():
+            start, end = _span(text, 0, ["profiles", index, accel_edit.RA_ARGS, *path])
+            if text[start] in "{[":
+                raise ValueError(f"{path[-1]!r} is not a single value")
+            spans.append((start, end, _literal(value)))
+    except (ValueError, IndexError, KeyError) as exc:
+        raise RawAccelError(f"settings.json could not be changed safely ({exc})") from exc
+    for start, end, literal in sorted(spans, reverse=True):
+        text = text[:start] + literal + text[end:]
+    # Proof: parsed again, the result differs from the original in those values only.
+    expected = json.loads(document.text)
+    expected["profiles"][index][accel_edit.RA_ARGS] = wanted
+    if json.loads(text) != expected:
+        raise RawAccelError("settings.json could not be changed safely (the result "
+                            "did not match)")
+    return text
+
+
+def restore_accel(document: Document, index: int, original: str) -> str:
+    """The settings text with a profile's acceleration arguments put back as ``original``."""
+    try:
+        if not isinstance(json.loads(original), dict):
+            raise ValueError("not an object")
+        start, end = _span(document.text, 0, ["profiles", index, accel_edit.RA_ARGS])
+    except (ValueError, IndexError) as exc:
+        raise RawAccelError(f"the original acceleration settings cannot be put back "
+                            f"({exc})") from exc
+    text = document.text[:start] + original + document.text[end:]
+    expected = json.loads(document.text)
+    expected["profiles"][index][accel_edit.RA_ARGS] = json.loads(original)
+    if json.loads(text) != expected:
+        raise RawAccelError("the original acceleration settings cannot be put back safely")
     return text
 
 

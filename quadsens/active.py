@@ -77,15 +77,28 @@ def windows_indicator(driver: str, live: rawaccel_live.Live, profile: str,
                       sent: Four | None = None, sent_at: float | None = None,
                       baseline: Four | None = None,
                       started: float | None = None,
-                      in_file: Four | None = None) -> Indicator:
+                      in_file: Four | None = None,
+                      acceleration: str = "") -> Indicator:
     """What RawAccel's driver is doing, as far as it can be told.
 
     ``driver`` is the state of the driver file, ``live`` the answer of the
     driver itself, ``sent`` and ``sent_at`` what RawAccel's writer last
     accepted from QuadSens for ``profile``, ``baseline`` the profile's own
     values, ``started`` when Windows started, ``in_file`` what settings.json
-    holds for the profile.
+    holds for the profile. ``acceleration`` says, in words, what is known
+    about the curve the driver holds; it is added to the detail whenever the
+    driver was read.
     """
+    shown = _windows(driver, live, profile, sent, sent_at, baseline, started, in_file)
+    if acceleration and live.kind == rawaccel_live.OK and live.values(profile) is not None:
+        return Indicator(shown.kind, shown.headline,
+                         shown.detail.rstrip(".") + ". " + acceleration)
+    return shown
+
+
+def _windows(driver: str, live: rawaccel_live.Live, profile: str, sent: Four | None,
+             sent_at: float | None, baseline: Four | None, started: float | None,
+             in_file: Four | None) -> Indicator:
     if driver == DRIVER_MISSING:
         return Indicator(INACTIVE, "Not active: RawAccel's driver is not installed",
                          "Install RawAccel with the button on top of the window.")

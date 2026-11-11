@@ -21,11 +21,23 @@ from .model import Scalars
 
 
 def linux_indicator(state: DriverState, applied: Scalars | None = None,
-                    applied_at: float | None = None) -> Indicator:
+                    applied_at: float | None = None, acceleration: str = "") -> Indicator:
     """From a fresh read of the module parameters.
 
-    ``applied`` and ``applied_at`` are what QuadSens last wrote, and when.
+    ``applied`` and ``applied_at`` are what QuadSens last wrote, and when;
+    ``acceleration`` is the curve read back from the module, in words, and is
+    added to the detail while the module is loaded.
     """
+    shown = _directions(state, applied, applied_at)
+    if acceleration and state.status is DriverStatus.OK:
+        return Indicator(shown.kind, shown.headline,
+                         (shown.detail.rstrip(".") + ". " if shown.detail else "")
+                         + acceleration + ".")
+    return shown
+
+
+def _directions(state: DriverState, applied: Scalars | None,
+                applied_at: float | None) -> Indicator:
     wrote = ("QuadSens last wrote %s at %s." % (directions_text(applied), clock(applied_at))
              if applied is not None and applied_at else "")
     if state.status is DriverStatus.NOT_LOADED:

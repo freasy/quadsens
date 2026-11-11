@@ -67,6 +67,14 @@ DEVICE_SETTINGS_SIZE = (256 + 256 + 200) * 2 + 32
 NAME_BYTES = 512
 ACCEL_ARGS_SIZE = 8 + 12 * 8 + 16 + 4 + 4 + 514 * 4      # 2184
 SPEED_ARGS_SIZE = 8 + 4 * 8                               # 40
+# accel_args (common/rawaccel-base.hpp): the mode, the gain switch, twelve
+# doubles in this order, the cap pair, the cap mode. Enum values as declared.
+ACCEL_X_AT = NAME_BYTES + 16 + 16
+ACCEL_DOUBLES = ("inputOffset", "outputOffset", "acceleration", "decayRate", "gamma",
+                 "motivity", "exponentClassic", "scale", "exponentPower", "limit",
+                 "syncSpeed", "smooth", "cap.x", "cap.y")
+ACCEL_MODE_NAMES = ("classic", "jump", "natural", "synchronous", "power", "lut", "noaccel")
+CAP_MODE_NAMES = ("in_out", "input", "output")
 OUTPUT_DPI_AT = NAME_BYTES + 16 + 16 + 2 * ACCEL_ARGS_SIZE + SPEED_ARGS_SIZE    # 4952
 PROFILE_SIZE = OUTPUT_DPI_AT + 8 * 8                      # 5016
 # A profile is followed by data the driver computes from it; how much is not
@@ -85,6 +93,17 @@ class Live:
     version: tuple[int, int, int] | None = None
     profiles: tuple[tuple[str, Four], ...] = ()      # name and the four numbers, in order
     detail: str = ""
+    # Per profile, the acceleration arguments the driver holds ("whole or
+    # horizontal"), under the names settings.json uses; () if not read.
+    accels: tuple[tuple[str, tuple[tuple[str, object], ...]], ...] = ()
+
+    def accel(self, name: str) -> dict[str, object] | None:
+        for profile_name, items in self.accels:
+            if profile_name == name:
+                data = dict(items)
+                data["Cap / Jump"] = {"x": data.pop("cap.x"), "y": data.pop("cap.y")}
+                return data
+        return None
 
     def values(self, name: str) -> Four | None:
         for profile_name, four in self.profiles:
@@ -170,6 +189,7 @@ def parse_read(data: bytes) -> Live:
     if size < PROFILE_SIZE or size > MAX_MODIFIER_SIZE or size % 8:
         return Live(UNREADABLE, detail="unexpected profile size %d" % size)
     found: list[tuple[str, Four]] = []
+    accels: list[tuple[str, tuple[tuple[str, object], ...]]] = []
     for index in range(profiles):
         start = IO_BASE_SIZE + index * size
         name = _name(data[start:start + NAME_BYTES])
@@ -178,7 +198,27 @@ def parse_read(data: bytes) -> Live:
                 or numbers[0] <= 0:
             return Live(UNREADABLE, detail="profile %d does not look right" % index)
         found.append((name, Four(*numbers)))
-    return Live(OK, profiles=tuple(found))
+        accels.append((name, _accel_args(data, start + ACCEL_X_AT)))
+    # The acceleration is passed on only if every profile's looks right.
+    return Live(OK, profiles=tuple(found),
+                accels=tuple((name, items) for name, items in accels if items)
+                if all(items for _name, items in accels) else ())
+
+
+def _accel_args(data: bytes, at: int) -> tuple[tuple[str, object], ...]:
+    """One accel_args as (key, value) pairs, () if it does not look right."""
+    mode, gain = struct.unpack_from("<iB", data, at)
+    doubles = struct.unpack_from("<14d", data, at + 8)
+    cap_mode = struct.unpack_from("<i", data, at + 8 + 14 * 8)[0]
+    if not 0 <= mode < len(ACCEL_MODE_NAMES) or gain not in (0, 1) \
+            or not 0 <= cap_mode < len(CAP_MODE_NAMES) \
+            or not all(math.isfinite(n) and abs(n) < 1e9 for n in doubles):
+        return ()
+    items: list[tuple[str, object]] = [("mode", ACCEL_MODE_NAMES[mode]),
+                                       ("Gain / Velocity", bool(gain))]
+    items += list(zip(ACCEL_DOUBLES, doubles))
+    items.append(("Cap mode", CAP_MODE_NAMES[cap_mode]))
+    return tuple(items)
 
 
 def read_driver(io: DeviceIo | None = None) -> Live:
@@ -209,4 +249,4 @@ def read_driver(io: DeviceIo | None = None) -> Live:
         answer = parse_read(io(IOCTL_READ, room))
     except (DeviceError, OSError) as exc:
         return Live(UNAVAILABLE, version, detail=str(exc))
-    return Live(answer.kind, version, answer.profiles, answer.detail)
+    return Live(answer.kind, version, answer.profiles, answer.detail, answer.accels)

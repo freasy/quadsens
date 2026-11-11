@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import accel_edit
 from .model import Scalars
 
 DEFAULT_PARAMS_DIR = Path("/sys/module/yeetmouse/parameters")
@@ -144,6 +145,98 @@ class Driver:
             raise DriverError("pkexec is not installed; cannot write root-only parameters")
         return [pkexec, str(Path(helper).resolve()),
                 *(format_value(v) for v in scalars.as_tuple())]
+
+    # ---- acceleration -----------------------------------------------------
+
+    def read_accel(self) -> dict[str, str]:
+        """The acceleration parameters of the loaded module, as the strings it holds."""
+        if not self.params_dir.is_dir():
+            raise DriverError("yeetmouse module is not loaded")
+        values: dict[str, str] = {}
+        for name in accel_edit.FORK_READ:
+            try:
+                values[name] = (self.params_dir / name).read_text(encoding="ascii").strip()
+            except PermissionError as exc:
+                raise DriverError("the acceleration parameters are not readable for "
+                                  "you") from exc
+            except OSError as exc:
+                raise DriverError(f"{name} could not be read: {exc.strerror or exc}") from exc
+        return values
+
+    def accel_found(self) -> accel_edit.Found:
+        """What the module is set to: a curve QuadSens edits, or why it does not."""
+        try:
+            return accel_edit.classify_fork(self.read_accel())
+        except DriverError as exc:
+            return accel_edit.Found(reason=str(exc)[:1].upper() + str(exc)[1:] + ".")
+
+    def _accel_values(self, curve: accel_edit.Curve) -> dict[str, str]:
+        """Values to write for ``curve``, after every check. Raises DriverError.
+
+        Nothing is written when the curve is not allowed, and nothing when the
+        module is currently set to something QuadSens does not edit (another
+        mode, or Offset, InputCap, OutputCap or PreScale in use): that
+        configuration stays in the driver's own settings program.
+        """
+        try:
+            values = accel_edit.fork_values(curve)
+        except accel_edit.AccelError as exc:
+            raise DriverError("Not written: " + " ".join(exc.reasons)) from exc
+        current = self.accel_found()
+        if not current.editable:
+            raise DriverError("Not written, because the driver is set to something "
+                              "QuadSens does not edit. " + current.reason)
+        return values
+
+    def write_accel_direct(self, curve: accel_edit.Curve) -> None:
+        """Write the curve straight to sysfs, in the safe order, then the update trigger.
+
+        Raises PermissionError when the files are not writable for this user.
+        """
+        values = self._accel_values(curve)
+        try:
+            for name, text in accel_edit.fork_write_order(values):
+                _write_existing(self.params_dir / name, text + "\n")
+        except PermissionError:
+            raise
+        except OSError as exc:
+            raise DriverError(f"writing driver parameters failed: {exc}") from exc
+
+    def accel_helper_command(self, curve: accel_edit.Curve) -> list[str]:
+        """The single pkexec command line that writes ``curve``."""
+        values = self._accel_values(curve)
+        helper = self._helper if self._helper is not None else find_helper()
+        if helper is None or not Path(helper).is_file():
+            raise DriverError(
+                f"helper script {HELPER_NAME} not found. Join group yeetmouse to write "
+                "without it, or install it system-wide (see README.md)")
+        pkexec = shutil.which(self.pkexec)
+        if pkexec is None:
+            raise DriverError("pkexec is not installed; cannot write root-only parameters")
+        return [pkexec, str(Path(helper).resolve()), "accel", values["AccelerationMode"],
+                values[accel_edit.FORK_SWITCH],
+                *(values[name] for name in accel_edit.FORK_SLOTS)]
+
+    def accel_differences(self, curve: accel_edit.Curve) -> list[str]:
+        """After a write: what the module holds that differs from ``curve``.
+
+        An empty list means every parameter reads back as written. That shows
+        the strings arrived; the module does not say whether it accepted them
+        (it keeps the strings and switches acceleration off internally when it
+        rejects a set), so the checks before writing are what is relied on.
+        """
+        wanted = accel_edit.fork_values(curve)
+        have = self.read_accel()
+        different = []
+        for name in (*accel_edit.FORK_STRING_PARAMS, accel_edit.FORK_SWITCH):
+            try:
+                same = abs(float(have[name]) - float(wanted[name])) <= 1e-9
+            except ValueError:
+                same = False
+            if not same:
+                different.append("%s is %s, written was %s"
+                                 % (name, have[name], wanted[name]))
+        return different
 
     def helper_installed(self) -> bool:
         """Whether the pkexec fallback has a helper script it may run."""
