@@ -5,6 +5,16 @@ describes, from the sources only, how the yeetmouse fork (Linux) and RawAccel
 (Windows) implement their acceleration settings, and how the two map onto each
 other.
 
+**Status after verification.** An independent check compared this document
+with both drivers' sources: it re-implemented each driver's formulas from its
+source alone, compared them numerically, and ran the fork's unmodified
+fixed-point C code (`accel_modes.c` with `FixedMath`) in a userspace build.
+No kernel module was loaded and no real RawAccel was run. Statements that this
+check confirmed numerically are marked "(verified numerically)"; its
+corrections are worked in and marked "(corrected)". Sections 7 and 8 are new
+and hold the rules QuadSens' editor enforces and what the check found in the
+fork. Where section 4 and section 7 differ, section 7 is what QuadSens does.
+
 **Nothing in this document was tested on hardware or against a running driver.**
 Everything was read from source code. Every factual statement is marked either
 `(source: file:line)` or `(inferred)`. "Inferred" means: concluded from the
@@ -691,7 +701,7 @@ height `h = cap.y - 1`
 |---|---|---|---|
 | Speed unit | counts per ms, measured time (source: driver/accel.c:209, driver/accel.c:238-239) | counts per ms, measured time, times `1000 / DPI` if a DPI is set (source: common/rawaccel.hpp:320, common/rawaccel.hpp:353-356 (v1.7.1)) | Same unit when DPI is 0 and `PreScale` is 1, so curve parameters carry over without conversion (inferred) |
 | DPI normalisation | `PreScale` scales speed and output (source: driver/accel.c:232-235) | `1000 / DPI` scales speed and output (source: common/rawaccel.hpp:320, common/rawaccel.hpp:412 (v1.7.1)) | Same structure: `PreScale = 1000 / DPI` (inferred). The fork's GUI tooltip suggests `800 / DPI` (source: gui/main.cpp:194), a different reference DPI |
-| Time limits | upper limit 100 ms, no lower limit, one time stamp for all devices (source: driver/accel.c:185, driver/accel.c:215) | [0.0625 ms or `1000 / rate`, 100 ms] in 1.7.1, per device, divided by packet count (source: driver/driver.cpp:84-94, driver/driver.cpp:378-392 (v1.7.1)) | Similar, not identical; no counterpart for the constant time option (inferred) |
+| Time limits | upper limit 100 ms, no lower limit, one time stamp for all devices (source: driver/accel.c:185, driver/accel.c:215). (corrected) The time difference in nanoseconds goes through a 32-bit conversion before the 100 ms limit is applied, see 8.4 | [0.0625 ms or `1000 / rate`, 100 ms] in 1.7.1, per device, divided by packet count (source: driver/driver.cpp:84-94, driver/driver.cpp:378-392 (v1.7.1)) | Similar, not identical; no counterpart for the constant time option (inferred) |
 | Final sensitivity | `Sensitivity` (source: driver/accel.c:297-298) | `Output DPI / 1000` (1.7), `Sensitivity multiplier` (1.6) | Identical after that conversion (inferred) |
 | Y/X ratio | `RatioYX` (source: driver/accel.c:309) | Y/X ratio key | Identical (inferred) |
 | Rotation | radians in sysfs, degrees in the config file (source: gui/DriverHelper.cpp:417) | degrees (source: common/math-vec2.hpp:14-18 (v1.7.1)) | Same matrix; identical only while the four directional numbers are neutral, because the fork scales by direction before rotating and RawAccel after (inferred) |
@@ -704,6 +714,12 @@ height `h = cap.y - 1`
 | Whole or by component, Lp norm, domain and range weights | always whole, Euclidean (source: driver/accel.c:238) | selectable (source: common/rawaccel.hpp:199-210 (v1.7.1)) | RawAccel only; the fork matches whole, `lpNorm` 2, weights 1 (inferred) |
 
 ### 3.2 Mode by mode
+
+(corrected) "Identical" below is about the formulas as real functions. The
+fork computes them in Q32.32 fixed point; how far that is from RawAccel's
+doubles was measured and is given in 8.6. The six modes Off, Linear, Classic,
+Power, Natural and Jump agree as real functions to about 5e-16 relative (Jump
+with gain 6e-9) (verified numerically).
 
 "Identical" below always assumes: fork `Offset` 0, `InputCap` 0, `OutputCap` 0;
 RawAccel whole mode, `lpNorm` 2, weights 1, no speed cap, no smoothing
@@ -719,8 +735,8 @@ halflife; and matching DPI handling as in 3.1 (inferred).
 | 2 Power, `UseSmoothing` 0 | `power`, cap mode `output`, `cap.y` 0 | `scale = Acceleration`, `exponentPower = Exponent`, `outputOffset = Midpoint` | Identical (inferred) |
 | 2 Power, `UseSmoothing` 1 | same, `Gain / Velocity` true, `cap.y > 0` | as above, `cap.y = Motivity` | Identical (inferred) |
 | 6 Natural | `natural` | `decayRate = Acceleration`, `limit = Exponent`, `inputOffset = Midpoint`, `Gain / Velocity = UseSmoothing` | Identical (inferred) |
-| 7 Jump | `jump` | `cap.x = Midpoint`, `cap.y = Acceleration`, `smooth = Exponent`, `Gain / Velocity = UseSmoothing` | Identical, except exactly at `v == Midpoint` with `smooth` 0, where the fork still returns 1 (source: driver/accel_modes.c:514, driver/accel_modes.c:522; common/accel-jump.hpp:58, common/accel-jump.hpp:77 (v1.7.1)) |
-| 5 Synchronous | `synchronous` (1.7) | `motivity = Motivity`, `gamma = Exponent`, `syncSpeed = Acceleration`, `smooth = Midpoint`, `Gain / Velocity = UseSmoothing` | Identical formula for `smooth > 0.03125`; with gain on, the tables differ slightly in precision. **Not the same for `smooth` 0 to 0.03125**, see the kernel branch in 1.5 (inferred) |
+| 7 Jump | `jump` | `cap.x = Midpoint`, `cap.y = Acceleration`, `smooth = Exponent`, `Gain / Velocity = UseSmoothing` | Identical (verified numerically), except exactly at `v == Midpoint` without gain whenever `smooth * input < 1` (not only at `smooth` 0: the step is hard in that whole range), where the fork still returns 1 and RawAccel already the value after the jump (corrected) (source: driver/accel_modes.c:514, driver/accel_modes.c:522; common/accel-jump.hpp:58, common/accel-jump.hpp:77 (v1.7.1)) |
+| 5 Synchronous | `synchronous` (1.7) | `motivity = Motivity`, `gamma = Exponent`, `syncSpeed = Acceleration`, `smooth = Midpoint`, `Gain / Velocity = UseSmoothing` | Identical formula for `smooth > 0.03125` (corrected: the formula only; the fork's fixed-point result is off by up to 280 % for `smooth` below 0.25, see 8.5); with gain on, the tables differ slightly in precision. **Not the same for `smooth` 0 to 0.03125**, see the kernel branch in 1.5 (inferred) |
 | 5 Synchronous | `motivity` (1.6) | `Motivity = motivity`, `Acceleration = midpoint`, `Exponent = ln(motivity) * exp(growthRate) / 2`, `Midpoint = 0.5` | Identical after this conversion (inferred, algebra). The reverse works only when the fork's `Midpoint` is 0.5 |
 | 4 Motivity | none of that name fits | - | **Only the name is shared.** The fork's formula is a logistic over speed (source: driver/accel_modes.c:472-473); RawAccel 1.6 `motivity` is a sigmoid in log-log space (source: common/accel-motivity.hpp:22-26 (v1.6.1)) |
 | 4 Motivity | `jump`, `Gain / Velocity` false | `cap.x = Midpoint`, `cap.y = Acceleration`, `smooth = 2 pi / Midpoint` | Identical, but only for `Midpoint >= 2 pi`, since `smooth` may not exceed 1 (inferred, algebra; numeric check agreed exactly) |
@@ -732,7 +748,10 @@ Not representable on the other side:
 
 - RawAccel only: by component mode, Lp norm other than 2, domain and range
   weights, cap modes `input` and `in_out`, legacy caps (`Gain / Velocity` false
-  with a cap), a non-zero `inputOffset` in classic, `Input Speed Cap`, the
+  with a cap; corrected: a legacy output cap of at least 1 for classic, or of
+  any value for power, equals the fork's `OutputCap = cap.y * Sensitivity`
+  while `RatioYX` is 1 (verified numerically); it stays outside what QuadSens
+  edits), a non-zero `inputOffset` in classic, `Input Speed Cap`, the
   smoothing halflives, snapping to both axes, the constant time option
   (inferred from 3.1 and 2.6).
 - Fork only: `Offset` as a pure shift, negative `Offset` (the GUI allows -50,
@@ -753,6 +772,13 @@ above).
 ## 4. Recommended common subset for editing
 
 Recommendation (inferred from sections 1 to 3; a proposal, not a finding).
+
+**(corrected) The ranges in the table below are not safe limits for the
+fork.** They were taken from RawAccel's validation and the fork's sliders, and
+the fork's fixed-point code can divide by zero or overflow inside them (see
+8.1 to 8.3). The limits QuadSens uses are in section 7. Synchronous is not
+edited at all; its `smooth` range of 0.05 to 1 given here is also wrong for
+the fork, which is usable only from about 0.25 (8.5).
 
 ### 4.1 Modes and parameters
 
@@ -831,6 +857,20 @@ neutral (inferred):
 9. **Units only match** with RawAccel DPI 0 and fork `PreScale` 1, or with
    `PreScale = 1000 / DPI` (inferred, see 3.1).
 10. **RawAccel 1.6 has no synchronous and different key names** (source: 2.8).
+11. **(added) Six decimals are not enough.** QuadSens' format for the
+    directional values has six decimals; for curve parameters that changes
+    small values noticeably and turns anything below 5e-7 into 0. The editor
+    writes ten decimals (rule R6 in section 7).
+12. **(added) RawAccel's `Cap / Jump` slot is shared** between classic, power
+    and jump and defaults to `{15, 1.5}` with cap mode `output`. A classic or
+    power curve "without cap" therefore must be written with `y` 0, or it is
+    capped at 1.5.
+13. **(added) Natural's bounds "greater than 0" are too weak for the fork:**
+    a tiny decay rate makes an internal quotient round to 0 and the next
+    division fails (8.1).
+14. **(added) A rejection also sets the fork's internal `Acceleration` to 0**,
+    not only the mode (source: driver/accel_modes.c:26, and the same pattern
+    in the other rejections).
 
 ---
 
@@ -924,3 +964,194 @@ Consequences (inferred):
   driver/accel.c:297-302).
 - RawAccel versions other than the two tags (for example 1.6.0 or 1.7.0) were
   not read.
+
+---
+
+## 7. Rules the editor enforces
+
+What QuadSens edits and within which limits. The limits are the intersection
+of what RawAccel's validation accepts, what the fork accepts, and what the
+fork's fixed-point code computes without a divide error or overflow. They
+were checked with a sweep of 5000 random parameter sets per mode against the
+userspace build of the fork's code: no set that passes these rules trapped or
+was rejected there (verified numerically). They are implemented in
+`quadsens/accel_edit.py` and, independently, in `helper/quadsens-apply`.
+
+### 7.1 Editable modes, parameters and ranges
+
+The conversions are the identity on these fields in both directions. Combined
+("whole") mode only. A RawAccel `classic` with `exponentClassic` 2 reads as
+Linear.
+
+| Mode | Fields and ranges (default) | Fork | RawAccel |
+|---|---|---|---|
+| Off | - | `AccelerationMode` 0 | `mode` `noaccel` |
+| Linear | acceleration 0.0001 to 1 (0.005); cap off or 0.1 to 10 | mode 1, `Acceleration`; cap off: `UseSmoothing` 0; on: `UseSmoothing` 1, `Midpoint` = cap | `classic`, `acceleration`, `exponentClassic` 2, `inputOffset` 0, `Cap mode` `output`, `cap.y` 0 (off) or cap, `Gain / Velocity` true |
+| Classic | acceleration 0.0001 to 2 (0.005); exponent 1.01 to 5 (2); cap as Linear | mode 3, `Acceleration`, `Exponent`, cap as Linear | as Linear with `exponentClassic` = exponent |
+| Power | scale 0.001 to 5 (1); exponent 0.01 to 1 (0.05); output offset 0 to min(5, 99 scale exponent) (0); cap off or above the offset, up to 10 | mode 2, `Acceleration` = scale, `Exponent`, `Midpoint` = offset; cap off: `UseSmoothing` 0; on: `UseSmoothing` 1, `Motivity` = cap | `power`, `scale`, `exponentPower`, `outputOffset`, `Cap mode` `output`, `cap.y` 0 or cap, `Gain / Velocity` true |
+| Natural | decay rate 0.001 to 5 (0.1); limit 0.01 to 8 with a distance of at least 0.01 from 1 (1.5); offset 0 to 50 (0); gain on or off | mode 6, `Acceleration` = decay rate, `Exponent` = limit, `Midpoint` = offset, `UseSmoothing` = gain | `natural`, `decayRate`, `limit`, `inputOffset` = offset, `Gain / Velocity` = gain |
+| Jump | input 0.1 to 50 (15); output 0.01 to 10 (1.5); smooth 0 to 1 (0.5); gain on or off | mode 7, `Midpoint` = input, `Acceleration` = output, `Exponent` = smooth, `UseSmoothing` = gain | `jump`, `cap.x` = input, `cap.y` = output, `smooth`, `Gain / Velocity` = gain |
+
+Preconditions for the two drivers to compute the same curve: fork `Offset` 0,
+`InputCap` 0, `OutputCap` 0; RawAccel whole mode, `lpNorm` 2, domain and
+range weights 1, `Input Speed Cap` 0, the three halflives 0, `Cap mode`
+`output`, classic `inputOffset` 0; and equal speed units (RawAccel device DPI
+0 and fork `PreScale` 1).
+
+### 7.2 Rules before writing
+
+- **R1** Every internal point of the curve lies at or below 100000 counts/ms,
+  computed in logarithms so that the check itself cannot overflow. Linear and
+  Classic with a cap: `cx = (|cap - 1| / e)^(1 / (e - 1)) / acceleration`
+  (`e` = 2 for Linear). Power: `ox = (offset / (n + 1))^(1/n) / scale` and,
+  with a cap, `cx = (cap / (n + 1))^(1/n) / scale`.
+- **R2** Power: offset at most `99 * scale * exponent` (the fork rejects above
+  100 and then switches acceleration off silently).
+- **R3** Power with a cap: cap strictly above the offset.
+- **R4** The ranges of 7.1.
+- **R5** The multiplier of the reference curve at 1000 counts/ms is at most
+  100000.
+- **R6** Numbers are written to the fork in fixed notation with ten decimals,
+  with a leading digit and a dot, never in exponent notation. The fork's
+  parser fails on `5e-05` and on `.5` and then keeps the old value; values
+  below 2.33e-10 become 0.
+- **R7** Write order on the fork: all string parameters (`Acceleration`,
+  `Exponent`, `Midpoint`, `Motivity`, `AccelerationMode`), then
+  `UseSmoothing`, then `update` = 1; all four slots and `UseSmoothing` are
+  rewritten on every change. `UseSmoothing` is live at once while the
+  constants wait for `update`; for Power, `UseSmoothing` 1 with stale cap
+  constants gives a multiplier of 0 (the pointer stands still) until `update`
+  has run.
+- RawAccel: every write sets `Cap / Jump`.y, `Cap mode`, `Gain / Velocity`
+  and, for classic, `inputOffset`, keeps every key of the arguments object
+  including `data`, and passes a port of RawAccel's own check
+  (`common/rawaccel-validate.hpp`) before `writer.exe` is run.
+
+### 7.3 Shown read-only, never converted
+
+- Fork: `Offset`, `InputCap` or `OutputCap` not 0; `PreScale` not 1; modes 4,
+  5, 8 and 9; Linear or Classic with `UseSmoothing` 1 and `Midpoint` 0;
+  Classic with `Exponent` at most 1; Jump with `Exponent` above 1 or
+  `Acceleration` not above 0; a negative `Midpoint`; anything that violates
+  R1 to R5.
+- RawAccel: by component mode; `lpNorm` not 2; domain or range weights not 1;
+  `Input Speed Cap` not 0; any halflife not 0; modes `lut`, `synchronous`,
+  `motivity`; classic or power with `Cap mode` other than `output`; classic
+  with `inputOffset` not 0; classic or power with `Gain / Velocity` false and
+  `cap.y` above 0; power with `cap.y` equal to `outputOffset`; natural with
+  `limit` 1; a device DPI other than 0.
+- Never touched by the editor: rotation, snapping, sensitivity and ratios,
+  the four directional numbers, anything under `devices` and
+  `defaultDeviceConfig`.
+
+On Linux the write is also refused when the module is currently in one of the
+read-only configurations above: nothing is written over a configuration
+QuadSens does not edit.
+
+### 7.4 What the driver tells, and what it does not
+
+The fork has no parameter that shows its internal mode. When it rejects a
+set, it sets the internal mode to 0 and logs a line with `printk`; the sysfs
+parameters keep the strings that were written (source:
+driver/accel_modes.c:24-28 and the other rejections; driver/accel.c:58, the
+mode is a string parameter). The kernel log is not readable for normal users.
+After a write QuadSens therefore reads the strings back and compares them
+with what it wrote, which shows that the write arrived, and says that the
+driver does not report whether it accepted the values. Acceptance rests on
+the rules above.
+
+---
+
+## 8. What the verification found in the fork
+
+All of the following was observed in a userspace build of the unmodified
+sources or read in them. What a running kernel does was not tested.
+
+### 8.1 Divide errors
+
+`FP64_DivPrecise` uses a bare 128/64-bit division (source:
+driver/FixedMath/Fixed64.h:281-387) and `update_constants()` reaches it
+without range checks. In the userspace build the process stopped with SIGFPE
+for these sets; what the kernel does on the corresponding divide error is
+unknown.
+
+- Power with a cap when `(cap / (E + 1))^(1/E) / A` reaches 2^31, for example
+  scale 0.5, exponent 0.05, cap 3, which is inside the sliders of the fork's
+  own settings program (source: driver/accel_modes.c:199-203).
+- Power with an output offset when `(M / (E + 1))^(1/E) / A` reaches 2^31, for
+  example scale 0.9, exponent 0.05, offset 4 (source:
+  driver/accel_modes.c:185-189).
+- Classic with a cap when `(|cap - 1| / E)^(1 / (E - 1)) / A` reaches 2^31,
+  for example acceleration 0.001, exponent 1.01, cap 5 (source:
+  driver/accel_modes.c:93-94).
+- Linear with a cap when `(|cap - 1| / 2) / A` reaches 2^31, for example
+  acceleration 2e-9, cap 10 (source: driver/accel_modes.c:66).
+- Natural when `A / |E - 1|` rounds to 0, for example decay rate 1e-9, limit 8
+  (source: driver/accel_modes.c:121-122).
+
+### 8.2 Silent switch-off
+
+A rejected set makes the internal mode 0 and the internal `Acceleration` 0,
+with a `printk` only; the sysfs strings stay (source:
+driver/accel_modes.c:24-28, 51-55, 78-82, 110-119, 128-133, 156-174).
+Rejected are: Linear with `A` 0; Classic with `UseSmoothing` 1 and `E` 0 or
+1; Power with `E` 0 or -1, with `A` 0, with `UseSmoothing` 1 and `M >= V`, or
+with `M / (A E)` above 100; Natural with `E` 1 or `A` 0; Jump with `M` 0;
+Synchronous with `V` at most 1. RawAccel accepts two of these that the fork
+rejects: a natural limit of 1 and a power cap equal to the output offset.
+
+### 8.3 Overflow without a trap
+
+`FP64_Exp2` saturates at 2^31, and adding 1 wraps to a negative number, for
+example Classic with acceleration 1.6 and exponent 4.95 without a cap at 150
+counts/ms (source: driver/FixedMath/Fixed64.h:824-838).
+
+### 8.4 Time difference
+
+The time between two reports, in nanoseconds, passes through a 32-bit
+`FP64_FromInt` before the 100 ms limit is applied (source:
+driver/FixedMath/Fixed64.h:95-97, driver/accel.c:199, driver/accel.c:209).
+Pauses between 2.147 s and 4.295 s give a negative time; `k * 4.295 s + t`
+gives `t`; exact multiples divide by zero. There is one static time stamp for
+all devices and no lower limit.
+
+### 8.5 Other observations
+
+- For a speed at or below 0 the curve value is the constant `f(0.001)`; the
+  constant is named `FP64_0_01` but holds 0.001 (source:
+  driver/accel.c:260-292, driver/accel_modes.h:70).
+- The fork's default is Linear with 0.1, `UseSmoothing` 1 and `Midpoint` 1.3,
+  that is a capped linear curve, not "off" (source: driver/defaults.h).
+- Kernel and settings program disagree on the order of `OutputCap` and
+  `Sensitivity`: the kernel computes `min(OutputCap, f * Sensitivity)`, the
+  preview of the settings program `min(f, OutputCap) * Sensitivity` (source:
+  driver/accel.c:297-302, gui/FunctionHelper.cpp:339).
+- Synchronous: the kernel's clamp branch for `smooth` at most 0.03125 is a
+  step, the settings program's is the intended clamp (source:
+  driver/accel_modes.c:288-293, gui/FunctionHelper.cpp:33-38); below `smooth`
+  0.25 the fixed-point result is off by up to 280 %.
+- The fork's own tools write numbers with the C++ stream default: six
+  significant digits of a single-precision float, and exponent notation below
+  0.0001 (source: gui/DriverHelper.cpp:66-74, gui/ConfigHelper.cpp:54-72).
+  `yeetmousectl save` followed by a load therefore keeps six significant
+  digits of what QuadSens wrote with ten decimals, and a value below 0.0001
+  would be written back as, for example, `5e-05`, which the module's parser
+  does not read. The ranges of 7.1 start at 0.0001, where the stream still
+  uses fixed notation (inferred from the C++ formatting rules; not run).
+
+### 8.6 Accuracy of the fork's fixed point
+
+Largest relative difference of the multiplier between the fork's fixed-point
+code and RawAccel's formulas in double precision, for speeds from 0.01 to 150
+counts/ms, inside the limits of section 7 (verified numerically): Linear
+5.7e-8, Classic 1.4e-5, Power 2.1e-5, Jump 1.6e-5, Natural without gain 1e-7,
+Natural with gain up to 1e-2 at 0.01 counts/ms and falling roughly with 1/v
+(7e-4 at 0.125, 3e-5 at 1).
+
+### 8.7 Still uncertain
+
+- What the kernel does on the divide error, and whether the installed module
+  takes the same 128-bit division path as the userspace build.
+- How Json.NET in RawAccel treats a missing key in the arguments object.
+- Details of sysfs writes (trailing newline, length limits).
+- RawAccel 1.6.0 and 1.7.0 were not read.
