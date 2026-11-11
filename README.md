@@ -355,12 +355,18 @@ state of the virtual mouse in
 
 ## Windows (preview)
 
-**The Windows build has not been run on real Windows yet.** It was written and
-tested on Linux, with stand-ins for RawAccel's files and for `writer.exe`.
-Treat everything in this section as untested until that sentence is gone.
+**Status (to be updated after testing on Windows):** written and tested on
+Linux, with stand-ins for RawAccel's files, for `writer.exe` and for
+usbip-win2. Verified so far on one Windows 11 VM: the virtual mouse can be
+attached without elevation through the usbip-win2 app, and it also attaches
+on Linux with the kernel's USB/IP client. **The automatic attach through
+`usbip.exe` from QuadSens is not yet verified on Windows, and neither is a
+calibration run natively on Windows.**
 
-On Windows QuadSens applies values only. It does not create the virtual
-mouse, so the calibration itself cannot be started from Windows.
+On Windows QuadSens has two parts: a virtual mouse served over USB/IP, which
+receives the calibration from the game, and a panel that writes the four
+multipliers into RawAccel's settings. The second part works without the
+first.
 
 ![The window as composed on Windows](docs/screenshot-windows.png)
 
@@ -368,8 +374,11 @@ mouse, so the calibration itself cannot be started from Windows.
 
 **What works**
 
-- Getting the four multipliers in three ways: the newest result file of the
-  game, if there is one (looked for in
+- The virtual mouse, if [usbip-win2](https://github.com/vadimgrn/usbip-win2)
+  is installed (see below).
+- Getting the four multipliers in four ways: from what the game writes to
+  the virtual mouse; from the newest result file of the game, if there is
+  one (looked for in
   `%USERPROFILE%\AppData\LocalLow\Statespace\aimlab_tb\Users\<id>\ASFData\<device>\ASFSettings.json`;
   that location is an assumption taken from the layout on Linux); *File >
   Import values…* with a file exported by QuadSens on Linux; or typing them.
@@ -380,10 +389,57 @@ mouse, so the calibration itself cannot be started from Windows.
 
 **What does not**
 
-- No virtual mouse, so no calibration on Windows. Calibrate on Linux and use
-  *File > Export values…* there, or type the values.
-- No driver installation: install RawAccel yourself.
+- No driver installation: install RawAccel and usbip-win2 yourself.
 - Nothing is re-applied at start by QuadSens (see below).
+
+### The virtual mouse on Windows
+
+Windows has no `/dev/uhid`. QuadSens serves the virtual mouse as a USB/IP
+device instead, and usbip-win2 attaches it as if it were plugged in.
+
+- **You install usbip-win2**, from its
+  [releases page](https://github.com/vadimgrn/usbip-win2/releases). Its
+  installer needs administrator rights and restarts the USB hubs, so all USB
+  devices drop out for a moment. QuadSens does not download or install it;
+  the first line of the window says whether it was found and has a button
+  that opens that page in the browser.
+- **Start virtual mouse** does two things in one click: it serves the device
+  on this PC and runs `usbip.exe attach -r 127.0.0.1 -b 1-1` for you, without
+  a console window. **Stop** detaches the port QuadSens attached (that port
+  only, never all) and stops serving. Closing QuadSens does the same.
+- **This PC only.** The server listens on `127.0.0.1`, port 3240. There is no
+  setting to listen on the network.
+- **What the device is.** It identifies itself as another vendor's mouse
+  (USB ID `1B1C:2B43` by default) because the game only offers the
+  calibration for such a device, and it answers the vendor software's
+  questions with made-up values. It never moves the pointer.
+- QuadSens never asks for administrator rights. If Windows refuses the
+  attach on your machine, the card shows the command to run in a console
+  opened as administrator.
+
+The card shows the state in words: *Stopped*, *Serving on 127.0.0.1:3240,
+waiting for attach*, *Attached: Windows sees the device*, *In use: a program
+is talking to the device*, or *Stopped after an error*.
+
+**Fallback: attach by hand.** If `usbip.exe` is not found or the automatic
+attach fails, QuadSens keeps serving. Open the USBip app that comes with
+usbip-win2, enter `127.0.0.1` and attach the device there. QuadSens notices
+it. On *Stop* it then detaches nothing (it did not attach it); it stops
+serving and the device disappears on the Windows side.
+
+**Trouble with the virtual mouse**
+
+- *Stays at "waiting for attach".* Read the message in the card; it quotes
+  what `usbip.exe` said. Try the fallback above.
+- *"Windows refused the attach" / access denied.* Run the command from the
+  message in a console opened as administrator, or use the USBip app.
+- *"Port 3240 on this PC is in use by another program".* Another USB/IP
+  server (or a second QuadSens) holds the port. Close it and start again.
+- *The device is still there after a crash.* In a console: `usbip port`
+  lists the attached devices; find the one with
+  `usbip://127.0.0.1:3240/1-1` and remove it with `usbip detach -p <port>`.
+- *The game does not offer the calibration.* Start the virtual mouse before
+  the game. This is the part that is not verified on Windows yet.
 
 **Requirements**
 
@@ -393,18 +449,28 @@ mouse, so the calibration itself cannot be started from Windows.
 - The folder must be writable for you, because `settings.json` in it is
   changed.
 
-**Usage**
+**Usage with the virtual mouse** (the step row on top leads through it)
 
-1. Get the values (see above). An imported file fills the four multipliers
-   directly; with a result file press *Use result*.
-2. *Choose folder…* and pick the folder that holds `rawaccel.exe`,
-   `writer.exe` and `settings.json`. A few common places are tried on their
-   own. With several profiles, pick the one to change.
-3. Look at the table: current and new value of the four RawAccel settings
-   (output DPI or sensitivity, Y/X ratio, L/R ratio, U/D ratio).
-4. *Apply* writes `settings.json` and runs `writer.exe settings.json`, which
-   makes RawAccel load it. If `writer.exe` reports a problem it shows its own
-   message window.
+1. *Start virtual mouse*, then start the game.
+2. *Restore original values* if RawAccel still holds multipliers from an
+   earlier run, so that the calibration measures the unscaled mouse. The
+   step is ticked by itself when the settings are untouched. This needs the
+   RawAccel folder: *Choose folder…* and pick the folder that holds
+   `rawaccel.exe`, `writer.exe` and `settings.json`. A few common places are
+   tried on their own. With several profiles, pick the one to change.
+3. Run the per-direction calibration in the game. The values it writes to
+   the virtual mouse appear in the window.
+4. *Use result*.
+5. Look at the table (current and new value of the four RawAccel settings:
+   output DPI or sensitivity, Y/X ratio, L/R ratio, U/D ratio) and press
+   *Apply*. It writes `settings.json` and runs `writer.exe settings.json`,
+   which makes RawAccel load it. If `writer.exe` reports a problem it shows
+   its own message window.
+
+**Usage without usbip-win2 (apply only).** Calibrate on Linux and use *File >
+Export values…* there, then *File > Import values…* on Windows, or type the
+four multipliers. The step row then starts at the values and leaves the
+first three steps aside. Choose the RawAccel folder, check the table, *Apply*.
 
 **Exact or approximate.** RawAccel applies these four settings after its
 acceleration curve; the Linux driver applies the multipliers before the curve.
@@ -450,8 +516,9 @@ time; that is expected for an unsigned program.
 - New values are entered with four decimals.
 - The virtual device is built from an analysis of the protocol. A future
   version of the game or of Proton may stop accepting it.
-- Windows: a preview that only applies values, not yet run on real Windows;
-  see [Windows (preview)](#windows-preview).
+- Windows: a preview. Applying values to RawAccel and the virtual mouse over
+  USB/IP are built; a calibration run natively on Windows is not verified
+  yet; see [Windows (preview)](#windows-preview).
 
 ## Troubleshooting
 
@@ -551,6 +618,7 @@ screenshots from fixture data:
 
 ```sh
 python3 tools/make_screenshot.py
+tools/usbip_spike/     command line front end of the USB/IP server, for testing
 python3 tools/make_screenshot.py --theme system
 python3 tools/make_screenshot.py --sheet /tmp/quadsens-sheet.png
 ```
@@ -573,11 +641,14 @@ quadsens/              application package
   platforms.py         which platform, where the result file is (no Qt)
   values_file.py       the values file for import and export (no Qt)
   rawaccel.py          RawAccel settings on Windows (no Qt)
+  usbip_server.py      the virtual mouse as a USB/IP device, for Windows (no Qt)
+  usbip_client.py      runs usbip.exe of usbip-win2: attach, find our port, detach (no Qt)
+  usbip_mouse.py       server plus attach as one thing with states (no Qt)
   persist.py           save to the config file and verify it (no Qt)
-  steps.py             the six guided steps, derived from state (no Qt)
+  steps.py             the guided steps, derived from state (no Qt)
   model.py             value types and number parsing (no Qt)
   colors.py            colour mixing, contrast and the derived colour set (no Qt)
-  hints.py, about.py   user-facing texts (no Qt)
+  hints.py, uhid_text.py, about.py   user-facing texts (no Qt)
   resources.py         locate bundled files (no Qt)
   ui/                  Qt widgets; ui/qt.py selects PySide6 or PyQt6,
                        ui/theme.py builds the stylesheet
