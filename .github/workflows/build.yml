@@ -22,22 +22,34 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Libraries Qt needs without a display
-        # The package mirrors are sometimes unreachable for a moment: apt retries
-        # each download, and the whole step is tried three times. It still fails
-        # if the packages cannot be installed.
-        run: |
-          for attempt in 1 2 3; do
-            if sudo apt-get -o Acquire::Retries=3 update \
-               && sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
-                    libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1; then
-              exit 0
-            fi
-            echo "apt failed (attempt $attempt of 3)"
-            sleep 20
-          done
-          exit 1
       - run: python -m pip install --disable-pip-version-check "PySide6-Essentials>=6.5"
+      - name: Libraries Qt needs without a display
+        # Only what is missing is installed: if Qt starts with the libraries the
+        # runner already has, the package mirrors are not needed at all. If it
+        # does not, apt is tried twice, and the step may take five minutes at
+        # most, so that unreachable mirrors fail quickly instead of hanging. The
+        # step still fails if Qt cannot be started in the end.
+        timeout-minutes: 5
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          probe() {
+            python -c "from PySide6 import QtSvg, QtWidgets; QtWidgets.QApplication([])"
+          }
+          if probe; then
+            echo "Qt starts with the libraries already present; nothing to install."
+            exit 0
+          fi
+          for attempt in 1 2; do
+            if sudo apt-get -o Acquire::Retries=2 update \
+               && sudo apt-get -o Acquire::Retries=2 install -y --no-install-recommends \
+                    libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1; then
+              break
+            fi
+            echo "apt failed (attempt $attempt of 2)"
+            sleep 10
+          done
+          probe
       - name: Tests
         env:
           QT_QPA_PLATFORM: offscreen
@@ -56,7 +68,7 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
           QUADSENS_PLATFORM: windows
-        run: python -m unittest tests.test_windows_logic tests.test_windows_ui tests.test_colors tests.test_diagram tests.test_steps tests.test_usbip_spike tests.test_usbip_windows tests.test_win_tools
+        run: python -m unittest tests.test_windows_logic tests.test_windows_ui tests.test_colors tests.test_diagram tests.test_steps tests.test_usbip_spike tests.test_usbip_windows tests.test_win_tools tests.test_active tests.test_win_autostart
 
   build-linux:
     needs: test-linux
