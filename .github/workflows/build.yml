@@ -68,7 +68,7 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
           QUADSENS_PLATFORM: windows
-        run: python -m unittest tests.test_windows_logic tests.test_windows_ui tests.test_colors tests.test_diagram tests.test_steps tests.test_usbip_spike tests.test_usbip_windows tests.test_win_tools tests.test_active tests.test_win_autostart
+        run: python -m unittest tests.test_windows_logic tests.test_windows_ui tests.test_colors tests.test_diagram tests.test_steps tests.test_usbip_spike tests.test_usbip_windows tests.test_win_tools tests.test_active tests.test_win_autostart tests.test_accel
 
   build-linux:
     needs: test-linux
