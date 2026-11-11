@@ -62,6 +62,13 @@ def _contrast(a: QtGui.QColor, b: QtGui.QColor) -> float:
     return (high + 0.05) / (low + 0.05)
 
 
+# The window has to fit an 800x600 screen. The exact minimum depends on the
+# fonts of the machine (about 660x510 with the fonts it was designed with), so
+# the limit leaves room for wider fonts instead of pinning one machine's value.
+MAX_MIN_WIDTH = 780
+MAX_MIN_HEIGHT = 560
+
+
 class FakeSession:
     """Stands in for the uhid session, so that "running" can be tested without uhid."""
 
@@ -302,8 +309,8 @@ class MainWindowTest(unittest.TestCase):
         window.show()
         _app.processEvents()
         hint = window.minimumSizeHint()
-        self.assertLessEqual(hint.width(), 720, hint)
-        self.assertLessEqual(hint.height(), 520, hint)
+        self.assertLessEqual(hint.width(), MAX_MIN_WIDTH, hint)
+        self.assertLessEqual(hint.height(), MAX_MIN_HEIGHT, hint)
         interactive = (QtWidgets.QAbstractButton, QtWidgets.QAbstractSpinBox,
                        QtWidgets.QComboBox, QtWidgets.QLineEdit, QtWidgets.QPlainTextEdit)
         for widget in window.findChildren(QtWidgets.QWidget):
@@ -1053,8 +1060,8 @@ class MainWindowTest(unittest.TestCase):
         for _ in range(5):
             _app.processEvents()
         hint = broken.minimumSizeHint()
-        self.assertLessEqual(hint.width(), 720, hint)
-        self.assertLessEqual(hint.height(), 520, hint)
+        self.assertLessEqual(hint.width(), MAX_MIN_WIDTH, hint)
+        self.assertLessEqual(hint.height(), MAX_MIN_HEIGHT, hint)
         broken.close()
 
         # And the busiest good case: applied and saved, with both messages showing.
@@ -1069,8 +1076,8 @@ class MainWindowTest(unittest.TestCase):
         for _ in range(5):
             _app.processEvents()
         hint = window.minimumSizeHint()
-        self.assertLessEqual(hint.width(), 720, hint)
-        self.assertLessEqual(hint.height(), 520, hint)
+        self.assertLessEqual(hint.width(), MAX_MIN_WIDTH, hint)
+        self.assertLessEqual(hint.height(), MAX_MIN_HEIGHT, hint)
 
     # ---- look ---------------------------------------------------------------
 

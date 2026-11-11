@@ -223,7 +223,10 @@ def read(path: str | os.PathLike[str]) -> Document:
     path = Path(path)
     try:
         # utf-8-sig: a byte order mark is accepted and not passed on.
-        text = path.read_text(encoding="utf-8-sig", newline="")
+        # newline="": line endings are kept as they are. open() is used because
+        # Path.read_text() only takes "newline" from Python 3.13 on.
+        with open(path, encoding="utf-8-sig", newline="") as handle:
+            text = handle.read()
     except FileNotFoundError as exc:
         raise RawAccelError(f"{path} does not exist. Start RawAccel once, so that it "
                             "writes its settings.") from exc
