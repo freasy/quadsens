@@ -344,12 +344,13 @@ class ThemeManager(QtCore.QObject):
         self._own_palette = False   # the application palette is ours, not the system's
         self._applying = False
         self._applied: str | None = None
+        self._seen_palette = int(app.palette().cacheKey())
         self._icon_dir = Path(tempfile.mkdtemp(prefix="quadsens-style-"))
         atexit.register(shutil.rmtree, self._icon_dir, True)
         app.installEventFilter(self)
         hints = app.styleHints()
         if hasattr(hints, "colorSchemeChanged"):
-            hints.colorSchemeChanged.connect(lambda *_: self.apply())
+            hints.colorSchemeChanged.connect(lambda *_: self._palette_event())
 
     # ---- state --------------------------------------------------------------
 
@@ -391,44 +392,68 @@ class ThemeManager(QtCore.QObject):
             icons[key] = target.as_posix()
         return icons
 
-    def apply(self) -> None:
-        """Set style, palette and stylesheet for the current theme."""
+    def apply(self, palette_changed: bool = False) -> None:
+        """Set style, palette and stylesheet for the current theme.
+
+        Qt keeps per-widget caches for an application style sheet, and a palette
+        change while a sheet is in place leaves entries behind that outlive
+        their widgets; the next update of the sheet then crashes. The sheet is
+        therefore never updated in place: whenever the palette or the sheet
+        changes, the old sheet is removed first (which discards the caches),
+        then the palette is set, then the new sheet.
+        """
         global _fixed
         if self._applying:
             return
         self._applying = True
         try:
             style = self._system_style if self._mode == NATIVE else "Fusion"
+            own = palette_for(quadsens_theme()) if self._mode == QUADSENS else None
+            if own is not None:
+                new_palette = not self._own_palette or self._app.palette() != own
+            else:
+                new_palette = self._own_palette
+            _fixed = quadsens_theme() if own is not None else None
+            if (not new_palette and not palette_changed and self._applied is not None
+                    and self._style.lower() == style.lower()):
+                wanted = "" if self._mode == NATIVE else self._sheet()
+                if wanted == self._applied:
+                    return
+            if self._applied:
+                self._applied = ""
+                self._app.setStyleSheet("")
             if self._style.lower() != style.lower():
                 self._style = style
                 self._app.setStyle(style)
-            if self._mode == QUADSENS:
-                _fixed = quadsens_theme()
-                palette = palette_for(_fixed)
-                if not self._own_palette or self._app.palette() != palette:
+            if own is not None:
+                if new_palette:
                     self._own_palette = True
-                    self._app.setPalette(palette)
-            else:
-                _fixed = None
-                if self._own_palette:
-                    # A default palette hands the colours back to the system.
-                    self._own_palette = False
-                    self._app.setPalette(QtGui.QPalette())
-            if self._mode == NATIVE:
-                wanted = ""
-            else:
-                theme = current_theme()
-                wanted = stylesheet(theme, self._icons(theme))
-            if wanted != self._applied:
-                self._applied = wanted
+                    self._app.setPalette(own)
+            elif self._own_palette:
+                # A default palette hands the colours back to the system.
+                self._own_palette = False
+                self._app.setPalette(QtGui.QPalette())
+            self._seen_palette = int(self._app.palette().cacheKey())
+            wanted = "" if self._mode == NATIVE else self._sheet()
+            self._applied = wanted
+            if wanted:
                 self._app.setStyleSheet(wanted)
         finally:
             self._applying = False
 
+    def _sheet(self) -> str:
+        theme = current_theme()
+        return stylesheet(theme, self._icons(theme))
+
+    def _palette_event(self) -> None:
+        """The application palette changed: by the desktop, or by apply() itself."""
+        if int(self._app.palette().cacheKey()) != self._seen_palette:
+            self.apply(palette_changed=True)
+
     def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:  # noqa: N802
         if (watched is self._app and not self._applying
                 and event.type() == QtCore.QEvent.Type.ApplicationPaletteChange):
-            QtCore.QTimer.singleShot(0, self.apply)
+            QtCore.QTimer.singleShot(0, self._palette_event)
         return False
 
 

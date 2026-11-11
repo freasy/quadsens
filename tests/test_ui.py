@@ -1223,6 +1223,35 @@ class MainWindowTest(unittest.TestCase):
                                     QtCore.QSettings.Format.IniFormat)
         self.assertEqual(settings.value("ui/theme"), "quadsens")
 
+    def test_switching_themes_survives_palette_changes_and_closed_windows(self) -> None:
+        # Qt crashes when an application style sheet is updated after the palette
+        # changed under it and a widget has gone since. The sheet is therefore
+        # replaced, never updated. This walks through a sequence of that kind; the
+        # crash depended on the memory layout, so it is a smoke test, not a proof.
+        manager = ThemeManager.instance()
+        self.addCleanup(manager.set_mode, "quadsens")
+        self.addCleanup(_app.setPalette, QtGui.QPalette())
+        sheets = set()
+        for round_ in range(6):
+            window = self.make_window()
+            window.show()
+            self.feed_write(window)
+            manager.set_mode(("system", "native", "quadsens")[round_ % 3])
+            _app.setPalette(self.dark_palette() if round_ % 2 else QtGui.QPalette())
+            for _ in range(3):
+                _app.processEvents()
+            self.windows.remove(window)
+            window.close()
+            window.deleteLater()
+            _app.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete.value)
+            _app.processEvents()
+            manager.set_mode("system")
+            sheets.add(_app.styleSheet())
+            manager.set_mode("quadsens")
+            self.assertEqual(self.window_colour(), "#0b0b0d")
+            self.assertIn("#d7263d", _app.styleSheet())
+        self.assertGreaterEqual(len(sheets), 2)   # light and dark system sheets were built
+
     def test_old_system_style_setting_is_migrated(self) -> None:
         path = str(self.tmp / "old.ini")
         settings = QtCore.QSettings(path, QtCore.QSettings.Format.IniFormat)
