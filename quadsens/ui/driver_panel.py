@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import time
 from collections.abc import Callable
 
-from .. import accel, active_linux
+from .. import accel, accel_edit, active_linux
 from ..calibration import Result, driver_scalars
 from ..driver import (
     PARAM_NAMES,
@@ -20,6 +21,7 @@ from ..driver import (
 from ..hints import FLIP_Y, PERSIST, driver_status, save_state_text, tool_missing
 from ..model import SCALE_MAX, SCALE_MIN, Scalars, format_deviation
 from ..persist import PersistError, SaveCommand, Saver, SaveState, describe_save_failure
+from .accel_editor import AccelEditor
 from .qt import QtCore, QtWidgets, Signal
 from .scale_spin import ScaleSpinBox
 from .status import (
@@ -30,6 +32,7 @@ from .status import (
     ElideLabel,
     Disclosure,
     MessageLabel,
+    SummaryDisclosure,
     WrapLabel,
     caption,
     column_header,
@@ -50,6 +53,9 @@ def find_yeetmouse_gui() -> str | None:
     return fixed if os.path.isfile(fixed) and os.access(fixed, os.X_OK) else None
 
 
+ACCEL_NOTE = ("On Linux the four directional values are applied before the curve, on "
+              "Windows after it. With acceleration on, the same four values therefore do "
+              "not give exactly the same result on both systems.")
 WATCH_MS = 3000          # how often the driver is read again while the card is visible
 DECIMALS = 4
 # Half a step of the last digit shown: closer than this is "the same value".
@@ -205,13 +211,17 @@ class DriverPanel(Card):
         # The acceleration the driver is set to, read-only: in short in the head
         # of the card, in full here, with the way to the driver's own settings.
         self.accel = accel.Accel(accel.YEETMOUSE, problem="not read yet")
-        self.accel_label = caption(ElideLabel())
-        self.accel_label.setAccessibleName("Acceleration the driver is set to")
         self.settings_button = QtWidgets.QPushButton("Open yeetmouse settings…")
         self.settings_button.setToolTip(
             "Start the settings program of the driver (yeetmouse), where the "
             "acceleration is changed. QuadSens only shows it.")
         self.settings_button.clicked.connect(self.open_driver_settings)
+        # Editing the curve: collapsed until asked for; the summary above stays.
+        self.accel_editor = AccelEditor("yeetmouse", ACCEL_NOTE)
+        self.accel_editor.apply_requested.connect(self.apply_accel)
+        self.accel_editor.revert_requested.connect(self.revert_accel)
+        self.accel_toggle = SummaryDisclosure("Acceleration", self.accel_editor)
+        self._accel_pending: accel_edit.Curve | None = None
         # Replaceable, so that tests start nothing.
         self.find_gui: Callable[[], str | None] = find_yeetmouse_gui
         self.launch: Callable[[str, str], bool] = start_program
@@ -236,7 +246,7 @@ class DriverPanel(Card):
 
         for control in (self.use_button, self.flip_check, self.reset_button,
                         self.read_button, self.apply_button, self.auto_check,
-                        self.advanced_toggle, self.settings_button):
+                        self.advanced_toggle, self.settings_button, self.accel_toggle):
             control.setAccessibleDescription(control.toolTip())
 
         self.message = MessageLabel("Driver message")
@@ -256,9 +266,11 @@ class DriverPanel(Card):
 
         layout = self.card_layout()
         head = QtWidgets.QHBoxLayout()
+        # The summary of the acceleration is itself the button that opens the
+        # editor; it is shortened to the room there is.
         head.setSpacing(SPACE_M)
         head.addWidget(heading("Driver (yeetmouse)"))
-        head.addWidget(self.accel_label, 1)
+        head.addWidget(self.accel_toggle, 1)
         head.addWidget(self.advanced_toggle)
         layout.addLayout(head)
         layout.addLayout(grid)
@@ -267,6 +279,7 @@ class DriverPanel(Card):
         layout.addWidget(self.indicator)
         layout.addWidget(self.message)
         layout.addWidget(self.advanced)
+        layout.addWidget(self.accel_editor)
         layout.addStretch(1)
 
         self.refresh()
@@ -372,8 +385,8 @@ class DriverPanel(Card):
             kind="info" if state.status is DriverStatus.OK else "warning")
         self.save_state = self._saver.state(self.driver_values())
         self._update_pending()
-        self._update_indicator()
         self._update_accel()
+        self._update_indicator()
         self.changed.emit()
         self.driver_read.emit()
         return state
@@ -383,14 +396,108 @@ class DriverPanel(Card):
         found = accel.read_yeetmouse(self._driver.params_dir, self._saver.config_path)
         changed = found != self.accel
         self.accel = found
-        self.accel_label.setText(found.short())
-        self.accel_label.setAccessibleDescription(found.summary())
-        self.accel_label.setToolTip(
-            found.summary() + ". Read-only here; change it in the driver's own settings "
-            "(Advanced > Open yeetmouse settings). This is what the driver was set to; "
-            "it applies no curve if it rejects these parameters, and says so only in "
-            "the kernel log.")
+        self.accel_toggle.set_summary(found.short(), found.summary())
+        self.accel_editor.set_found(self._driver.accel_found(), keep_edits=True)
+        self.accel_editor.set_can_revert(self._previous_accel() is not None)
+        self.accel_editor.set_busy(self._process is not None)
+        self.accel_toggle.setToolTip(
+            found.summary() + ". Click to open the acceleration editor. This is what "
+            "the driver was set to; it applies no curve if it rejects these parameters, "
+            "and says so only in the kernel log.")
         return changed
+
+    # ---- editing the acceleration ---------------------------------------------------
+
+    def _previous_accel(self) -> accel_edit.Curve | None:
+        """The curve that was active before the last Apply acceleration, if known."""
+        stored = self._settings.value("driver/accel_previous", "", type=str)
+        try:
+            data = json.loads(stored) if stored else None
+            return accel_edit.from_dict(data["mode"], data["values"]) if data else None
+        except (ValueError, KeyError, TypeError):
+            return None
+
+    def _remember_previous(self, curve: accel_edit.Curve | None) -> None:
+        if curve is None:
+            self._settings.remove("driver/accel_previous")
+        else:
+            self._settings.setValue("driver/accel_previous", json.dumps(
+                {"mode": curve.mode, "values": curve.as_dict()}))
+
+    def apply_accel(self, curve: accel_edit.Curve) -> None:
+        """Write a curve to the driver: directly if permitted, otherwise through pkexec.
+
+        Every check is made before anything is written; the driver module
+        itself cannot be trusted to refuse a set it cannot compute.
+        """
+        if self._process is not None:
+            return
+        before = self._driver.accel_found().curve
+        try:
+            self._driver.write_accel_direct(curve)
+        except PermissionError:
+            try:
+                command = self._driver.accel_helper_command(curve)
+            except DriverError as exc:
+                self.message.show_message(str(exc), error=True)
+                return
+            self._accel_pending = curve
+            self._accel_before = before
+            self.message.show_message("Waiting for authorization (pkexec) ...")
+            self._start(command, self._accel_helper_finished, "pkexec could not be started.")
+            return
+        except DriverError as exc:
+            self.message.show_message(str(exc), error=True)
+            return
+        self._accel_applied(curve, before, "directly")
+
+    def revert_accel(self) -> None:
+        previous = self._previous_accel()
+        if previous is None:
+            self.message.show_message("There is no previous acceleration to go back to.")
+            return
+        self.apply_accel(previous)
+
+    def _accel_helper_finished(self, exit_code: int,
+                               _status: QtCore.QProcess.ExitStatus) -> None:
+        process, curve = self._process, self._accel_pending
+        if process is None or curve is None:
+            return
+        stderr = bytes(process.readAllStandardError().data()).decode("utf-8", "replace")
+        self._accel_pending = None
+        self._finish_process()
+        if exit_code != 0:
+            hint = (" If the helper is older than this QuadSens, install the current "
+                    "helper/quadsens-apply (see README).") if exit_code == 2 else ""
+            self.message.show_message(describe_helper_failure(exit_code, stderr) + hint,
+                                      error=True)
+            return
+        self._accel_applied(curve, self._accel_before, "through pkexec")
+
+    def _accel_applied(self, curve: accel_edit.Curve, before: accel_edit.Curve | None,
+                       how: str) -> None:
+        if before is not None and not before.same(curve):
+            self._remember_previous(before)
+        try:
+            differences = self._driver.accel_differences(curve)
+        except DriverError as exc:
+            differences = [str(exc)]
+        self.accel_editor.set_found(self._driver.accel_found())
+        self.refresh()
+        if differences:
+            self.message.show_message(
+                "Acceleration written %s, but the driver reads back differently: %s. Use "
+                "Revert to previous, or check the driver's own settings."
+                % (how, "; ".join(differences)), error=True)
+            self.indicator.show_state(
+                "✕", "Acceleration: read-back differs from what was written",
+                "; ".join(differences), "error", "error")
+            return
+        self.message.show_message(
+            "✓ Acceleration written %s and read back: %s. The driver does not report "
+            "whether it accepted the values; QuadSens checked them before writing. It "
+            "takes effect with the next mouse movement, within a second."
+            % (how, curve.describe()))
 
     def open_driver_settings(self) -> None:
         """Start the driver's own settings program, or say how to get it."""
@@ -409,7 +516,9 @@ class DriverPanel(Card):
 
     def _update_indicator(self) -> None:
         self.active = shown = active_linux.linux_indicator(
-            self.state, self.saved_scalars(), self._applied_at)
+            self.state, self.saved_scalars(), self._applied_at,
+            self.accel.summary() if not self.accel.problem else "")
+        self.indicator.detail.setToolTip(shown.detail)
         self.indicator.show_state(shown.mark, shown.headline, shown.detail, shown.tint,
                                   shown.kind)
         # With a driver problem the banner above says what to do; the indicator
@@ -427,8 +536,9 @@ class DriverPanel(Card):
             return
         if self._driver.read() != self.state:
             self.refresh()
-        else:
-            self._update_accel()
+        elif self._update_accel():
+            self._update_indicator()
+            self.changed.emit()
 
     def showEvent(self, event: object) -> None:  # noqa: N802 (Qt name)
         super().showEvent(event)        # type: ignore[arg-type]

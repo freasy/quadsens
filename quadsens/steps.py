@@ -193,7 +193,8 @@ def _detail(step: Step, done: bool, state: FlowState) -> str:
             return "A new calibration result has arrived."
         if done:
             return "Using the calibration result that was already there."
-        return "Run the per-direction calibration in the game; the result shows up here."
+        return ("Run the per-direction calibration in the game; the result shows up here. "
+                "It reflects the acceleration that is active while you calibrate.")
     if step is Step.USE:
         if done:
             return "The new values are the calibration result."
@@ -301,7 +302,8 @@ def derive_windows(state: WinFlowState) -> list[StepInfo]:
         WinStep.CALIBRATE: (
             "A new calibration result has arrived." if state.result_is_new else
             "Using the values that are there." if done[WinStep.CALIBRATE] else
-            "Run the per-direction calibration in the game; the result shows up here."),
+            "Run the per-direction calibration in the game; the result shows up here. It "
+            "reflects the acceleration that is active while you calibrate."),
         WinStep.USE: (
             "The four multipliers are set." if state.values_ready else
             "Take the four values of the result as multipliers." if state.result_available

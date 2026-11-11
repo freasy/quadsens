@@ -7,10 +7,11 @@ import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
-from .. import accel, active, rawaccel, rawaccel_live, win_autostart
+from .. import accel, accel_edit, active, rawaccel, rawaccel_live, win_autostart
 from ..calibration import Result, driver_scalars
 from ..model import SCALE_MAX, SCALE_MIN, Scalars
 from ..rawaccel import Four, RawAccelError
+from .accel_editor import AccelEditor
 from .qt import QtCore, QtWidgets, Signal
 from .scale_spin import ScaleSpinBox
 from .status import (
@@ -33,6 +34,9 @@ DIRECTIONS: tuple[str, ...] = ("right", "left", "down", "up")
 DECIMALS = 4
 NO_VALUE = "–"
 WATCH_MS = 3000          # how often the driver is asked again while the card is visible
+ACCEL_NOTE = ("On Windows the four directional values are applied after the curve, on "
+              "Linux before it. With acceleration on, the same four values therefore do "
+              "not give exactly the same result on both systems.")
 AUTOSTART_TIP = (
     "RawAccel's driver forgets its settings when Windows shuts down. With this ticked, "
     "QuadSens writes one value into the registry of your user account (" +
@@ -191,9 +195,17 @@ class RawAccelPanel(Card):
             "acceleration is changed. QuadSens only shows it.")
         self.settings_button.clicked.connect(self.open_rawaccel)
         self.launch: Callable[[str, str], bool] = start_program     # replaced in tests
+        # Editing the curve: collapsed until asked for; the summary stays.
+        self.accel_editor = AccelEditor("RawAccel", ACCEL_NOTE)
+        self.accel_editor.apply_requested.connect(self.apply_accel)
+        self.accel_editor.revert_requested.connect(self.revert_accel)
+        self.accel_toggle = Disclosure("Acceleration", self.accel_editor)
+        self.accel_toggle.setToolTip(
+            "Show the acceleration editor: mode, parameters and a preview of the curve.")
         accel_row = QtWidgets.QHBoxLayout()
         accel_row.setSpacing(SPACE_M)
         accel_row.addWidget(self.accel_label, 1)
+        accel_row.addWidget(self.accel_toggle)
         accel_row.addWidget(self.settings_button)
         self.indicator = ActiveIndicator("RawAccel driver activity", wrap=True)
         self.autostart_check = QtWidgets.QCheckBox("Re-appl&y at Windows sign-in")
@@ -248,7 +260,8 @@ class RawAccelPanel(Card):
 
         for control in (self.choose_button, self.use_button, self.reset_button,
                         self.apply_button, self.restore_button, self.flip_check,
-                        self.advanced_toggle, self.autostart_check, self.settings_button):
+                        self.advanced_toggle, self.autostart_check, self.settings_button,
+                        self.accel_toggle):
             control.setAccessibleDescription(control.toolTip())
 
         self.message = MessageLabel("RawAccel message")
@@ -272,6 +285,7 @@ class RawAccelPanel(Card):
         autostart_row.addWidget(self.autostart_check)
         autostart_row.addWidget(self.boot_label, 1)
         layout.addLayout(autostart_row)
+        layout.addWidget(self.accel_editor)
         layout.addWidget(self.advanced)
         layout.addStretch(1)
 
@@ -426,14 +440,19 @@ class RawAccelPanel(Card):
     def is_neutral(self) -> bool:
         """True when the file holds the profile's own values: nothing of ours is in it."""
         return self.document is not None and self.current() is not None \
-            and not self.can_restore()
+            and not self._values_changed()
 
-    def can_restore(self) -> bool:
+    def _values_changed(self) -> bool:
         current = self.current()
         if current is None or self.document is None:
             return False
         stored = self._stored("baseline")
         return stored is not None and not current.is_close(stored, 2e-6)
+
+    def can_restore(self) -> bool:
+        """Something of the profile differs from its original: the four values or
+        the acceleration."""
+        return self._values_changed() or self.accel_changed()
 
     # ---- showing ------------------------------------------------------------------
 
@@ -500,11 +519,83 @@ class RawAccelPanel(Card):
             profile = profiles[index] if isinstance(profiles, list) \
                 and index < len(profiles) and isinstance(profiles[index], dict) else {}
             self.accel = accel.read_rawaccel_profile(profile)
+            found = accel_edit.classify_rawaccel(profile, document.data)
+        if document is None:
+            found = accel_edit.Found(reason="There is no settings file yet.")
+        self.accel_editor.set_found(found, keep_edits=True)
+        self.accel_editor.set_can_revert(bool(self._stored_text("accel_previous")))
+        self.accel_editor.set_busy(self.is_busy())
         text = self.accel.summary()
         self.accel_label.setText(text)
         self.accel_label.setAccessibleDescription(text)
         self.accel_label.setToolTip(text + ". Read-only here; change it in RawAccel.")
         self.settings_button.setEnabled(self.folder is not None)
+
+    # ---- editing the acceleration ---------------------------------------------------
+
+    def _stored_text(self, what: str) -> str:
+        if self.document is None or self.folder is None:
+            return ""
+        return str(self._settings.value(f"rawaccel/{what}/{self._key()}", "", type=str))
+
+    def _store_text(self, what: str, text: str) -> None:
+        key = f"rawaccel/{what}/{self._key()}"
+        if text:
+            self._settings.setValue(key, text)
+        else:
+            self._settings.remove(key)
+
+    def accel_changed(self) -> bool:
+        """Whether the profile's acceleration differs from what it was originally."""
+        original = self._stored_text("accel_baseline")
+        if not original or self.document is None:
+            return False
+        try:
+            return rawaccel.accel_text(self.document, self.profile_index()) != original
+        except RawAccelError:
+            return False
+
+    def apply_accel(self, curve: accel_edit.Curve) -> None:
+        """Write a curve into the profile and let RawAccel load it."""
+        self._write_accel(curve=curve)
+
+    def revert_accel(self) -> None:
+        """Put back the acceleration that was there before the last Apply acceleration."""
+        previous = self._stored_text("accel_previous")
+        if not previous:
+            self.message.show_message("There is no previous acceleration to go back to.")
+            return
+        self._write_accel(original=previous)
+
+    def _write_accel(self, curve: accel_edit.Curve | None = None, original: str = "") -> None:
+        if self.is_busy() or self.folder is None:
+            return
+        path = rawaccel.settings_path(self.folder)
+        try:
+            # Read again right before writing: RawAccel may have saved meanwhile.
+            self.document = rawaccel.read(path)
+            index = self.profile_index()
+            before = rawaccel.accel_text(self.document, index)
+            first_time = not self._stored_text("accel_baseline")
+            if curve is not None:
+                text = rawaccel.patch_accel(self.document, index, curve)
+            else:
+                text = rawaccel.restore_accel(self.document, index, original)
+            backup = rawaccel.write(path, text, backup=first_time
+                                    and self._stored("baseline") is None)
+        except RawAccelError as exc:
+            self.message.show_message(f"Nothing was changed: {exc}", error=True)
+            self.reload()
+            return
+        if first_time:
+            self._store_text("accel_baseline", before)       # the original, kept exactly
+        self._store_text("accel_previous", before)
+        self._settings.sync()
+        self._what = "acceleration"
+        self._backup = backup
+        self._target = None
+        self.reload()
+        self._run_writer()
 
     def open_rawaccel(self) -> None:
         """Start RawAccel's own window, or say where it should be."""
@@ -547,12 +638,29 @@ class RawAccelPanel(Card):
             self._driver_state(), self.live, self.profile_name(),
             self._stored("sent") if usable else None, self.sent_at(),
             self.baseline() if usable else None, self._started(),
-            self.current() if usable else None)
+            self.current() if usable else None, self._live_accel_text())
         changed = shown != self.active
         self.active = shown
         self.indicator.show_state(shown.mark, shown.headline, shown.detail, shown.tint,
                                   shown.kind)
         return changed
+
+    def _live_accel_text(self) -> str:
+        """What the driver's own answer says about the curve, compared with the file."""
+        args = self.live.accel(self.profile_name())
+        if args is None:
+            return "The acceleration is not read back from the driver." \
+                if self.live.kind == rawaccel_live.OK else ""
+        held = accel.read_rawaccel_profile({accel.WHOLE_ARGS: args}).summary()
+        in_file = self.accel_editor.found().curve
+        in_driver = accel_edit.classify_rawaccel(
+            {accel_edit.RA_ARGS: args, accel_edit.RA_SPEED: {}}).curve
+        if in_file is not None and in_driver is not None:
+            if in_driver.same(in_file):
+                return "Acceleration read back from the driver: %s." % in_driver.describe()
+            return ("The driver holds another acceleration than settings.json: %s."
+                    % in_driver.describe())
+        return "Read back from the driver: %s." % held
 
     def watch(self) -> None:
         """Ask the driver again, cheaply, while the card is visible."""
@@ -627,6 +735,11 @@ class RawAccelPanel(Card):
             target = baseline if restore else rawaccel.map_values(
                 baseline, self.values(), self.flip())
             text = rawaccel.patch(self.document, index, target)
+            original_accel = self._stored_text("accel_baseline") if restore else ""
+            if original_accel:
+                # "Restore original" covers the acceleration too: the very text
+                # the profile had before QuadSens first changed it.
+                text = rawaccel.restore_accel(rawaccel.parse(text), index, original_accel)
             backup = rawaccel.write(path, text, backup=first_time and not restore)
         except RawAccelError as exc:
             self.message.show_message(f"Nothing was changed: {exc}", error=True)
@@ -634,11 +747,18 @@ class RawAccelPanel(Card):
             return
         self._store("baseline", baseline)
         self._store("written", target)
+        if restore:
+            self._store_text("accel_baseline", "")
+            self._store_text("accel_previous", "")
         self._target = target
         self._settings.sync()
         self._what = "restored" if restore else "written"
         self._backup = backup
         self.reload()
+        self._run_writer()
+
+    def _run_writer(self) -> None:
+        assert self.folder is not None
         command = rawaccel.writer_command(self.folder)
         if command is None:
             self._report(rawaccel.describe_writer(rawaccel.MISSING))
@@ -655,8 +775,10 @@ class RawAccelPanel(Card):
         process.start(command[0], command[1:])
 
     def _report(self, result: rawaccel.WriterResult) -> None:
-        what = "The original values are back in settings.json." if self._what == "restored" \
-            else "The new values are in settings.json."
+        what = {"restored": "The original values are back in settings.json.",
+                "acceleration": "The acceleration is in settings.json (%s)."
+                % self.accel.summary()[len("Acceleration: "):]}.get(
+                    self._what, "The new values are in settings.json.")
         if self._backup is not None:
             what += f" The original file was kept as {self._backup.name}."
         if result.ok:

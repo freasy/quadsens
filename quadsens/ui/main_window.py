@@ -41,6 +41,8 @@ from .values_io import ValuesIO
 from .window_common import WindowCommon, about_html  # noqa: F401 (about_html re-exported)
 
 DEFAULT_SIZE = (860, 600)
+# Below the size at which everything fits, the page scrolls instead of being cut.
+MINIMUM_SIZE = (640, 480)
 
 
 class MainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
@@ -95,7 +97,16 @@ class MainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
         layout.addWidget(self.steps_bar)
         layout.addWidget(self.mouse_panel)
         layout.addLayout(self._lower)
-        self.setCentralWidget(central)
+        # The page scrolls when it does not fit, which happens once the
+        # acceleration editor is opened on a small screen. Collapsed, it fits
+        # the size minimumSizeHint() names.
+        self.scroll = QtWidgets.QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.scroll.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        self.scroll.setWidget(central)
+        self.setCentralWidget(self.scroll)
+        self.setMinimumSize(*MINIMUM_SIZE)
 
         self._build_menus()
 
@@ -272,6 +283,16 @@ class MainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
             # Back to the raw mouse: only a calibration from now on is a new one.
             self._baseline = time.time()
         self.update_steps()
+
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 (Qt name)
+        """The size from which nothing scrolls: what the page needs, plus the menu bar.
+
+        The window itself may be made smaller (see MINIMUM_SIZE); the page
+        then scrolls.
+        """
+        content = self.scroll.widget().minimumSizeHint()
+        return QtCore.QSize(content.width(),
+                            content.height() + self.menuBar().sizeHint().height())
 
     def _mirror_active(self) -> None:
         shown = self.driver_panel.active

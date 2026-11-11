@@ -25,8 +25,8 @@ except ImportError:  # pragma: no cover - depends on the environment
 
 import quadsens
 from tests import widths  # noqa: E402 (needs a Qt binding, checked above)
-from quadsens import about, colors, driver_setup, emulator, hints
-from quadsens.driver import PARAM_NAMES, Driver
+from quadsens import about, accel_edit, colors, driver_setup, emulator, hints
+from quadsens.driver import PARAM_NAMES, Driver, DriverError
 from quadsens.model import Scalars
 from quadsens.persist import Saver, SaveState
 from quadsens.steps import Step
@@ -401,16 +401,16 @@ class MainWindowTest(unittest.TestCase):
         window = self.make_window()
         window.show()
         panel = window.driver_panel
-        self.assertEqual(panel.accel_label.text(),
+        self.assertEqual(panel.accel_toggle.summary(),
                          "Acceleration: Classic, 0.05, 1.8; output cap 2")
-        self.assertEqual(panel.accel_label.accessibleDescription(),
+        self.assertEqual(panel.accel_toggle.accessibleDescription(),
                          "Acceleration: Classic, Acceleration 0.05, Exponent 1.8; "
                          "output cap 2; UseSmoothing off")
         # Changed in the driver's own program: the next look shows it.
         (self.params / "AccelerationMode").write_text("12\n")
         before["AccelerationMode"] = "12\n"
         panel.watch()
-        self.assertEqual(panel.accel_label.text(),
+        self.assertEqual(panel.accel_toggle.summary(),
                          "Acceleration: mode 12 (not known to QuadSens)")
 
         started: list[tuple[str, str]] = []
@@ -429,6 +429,168 @@ class MainWindowTest(unittest.TestCase):
         # Showing it wrote nothing.
         self.assertEqual({path.name: path.read_text() for path in self.params.iterdir()},
                          before)
+
+    # ---- editing the acceleration ---------------------------------------------
+
+    ACCEL_FILES = (("AccelerationMode", "1"), ("Acceleration", "0.1"), ("Exponent", "1.8"),
+                   ("Midpoint", "1.3"), ("Motivity", "1.5"), ("UseSmoothing", "1"),
+                   ("Offset", "0"), ("InputCap", "0"), ("OutputCap", "0"), ("PreScale", "1"))
+
+    def accel_window(self, **changes: str) -> MainWindow:
+        for name, text in self.ACCEL_FILES:
+            (self.params / name).write_text(changes.get(name, text) + "\n")
+        window = self.make_window()
+        window.show()
+        return window
+
+    def accel_state(self) -> dict[str, str]:
+        return {name: (self.params / name).read_text().strip()
+                for name, _text in self.ACCEL_FILES}
+
+    def test_acceleration_editor_is_collapsed_and_costs_no_room(self) -> None:
+        window = self.accel_window()
+        panel = window.driver_panel
+        self.assertFalse(panel.accel_toggle.isChecked())
+        self.assertFalse(panel.accel_editor.isVisible())
+        self.assertEqual(panel.accel_toggle.summary(), "Acceleration: Linear, 0.1, 1.3; cap none")
+        hint = window.minimumSizeHint()
+        self.assertLessEqual(hint.width(), MAX_MIN_WIDTH, widths.report(window))
+        self.assertLessEqual(hint.height(), MAX_MIN_HEIGHT, widths.report(window))
+        # Opened, the page scrolls instead of pushing the window off the screen.
+        panel.accel_toggle.setChecked(True)
+        _app.processEvents()
+        self.assertTrue(panel.accel_editor.isVisible())
+        self.assertGreater(window.minimumSizeHint().height(), MAX_MIN_HEIGHT)
+        self.assertLessEqual(window.minimumHeight(), 520)
+        # The fork's own default is a capped line, and that is what the editor shows.
+        editor = panel.accel_editor
+        self.assertEqual(editor.found().curve, accel_edit.make("linear", accel=0.1, cap=1.3))
+        self.assertFalse(editor.apply_button.isEnabled())            # nothing edited yet
+        self.assertIn("no changes", editor.change_label.text())
+        self.assertIn("before the curve", editor.note_label.text())
+        self.assertIn("far more than the four directional values", editor.note_label.text())
+        self.assertIn("acceleration that is active while you calibrate",
+                      " ".join(info.detail for info in window.update_steps()))
+        self.assertEqual(len(window.steps_bar.chips), 6)             # not a step
+
+    def test_each_mode_is_written_in_the_safe_order_and_read_back(self) -> None:
+        window = self.accel_window()
+        panel = window.driver_panel
+        editor = panel.accel_editor
+        order: list[str] = []
+        from quadsens import driver as driver_module
+        original = driver_module._write_existing
+        patcher = mock.patch.object(
+            driver_module, "_write_existing",
+            lambda path, text: (order.append(Path(path).name), original(path, text))[1])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        curves = [accel_edit.make("off"), accel_edit.make("linear", accel=0.02),
+                  accel_edit.make("classic", accel=0.02, exponent=2.5, cap=3.0),
+                  accel_edit.make("power", exponent=0.3, output_offset=1.0, cap=3.0),
+                  accel_edit.make("natural", limit=2.0, offset=5.0, gain=False),
+                  accel_edit.make("jump", input=30, output=2.0)]
+        for curve in curves:
+            order.clear()
+            editor.set_curve(curve)
+            self.assertTrue(editor.apply_button.isEnabled(), curve)
+            self.assertIn("→  New: " + curve.describe(), editor.change_label.text())
+            editor.apply_button.click()
+            self.assertEqual(order, ["Acceleration", "Exponent", "Midpoint", "Motivity",
+                                     "AccelerationMode", "UseSmoothing", "update"], curve)
+            wanted = accel_edit.fork_values(curve)
+            state = self.accel_state()
+            for name, text in wanted.items():
+                self.assertEqual(state[name], text, (curve, name))
+            self.assertRegex(state["Acceleration"], r"^\d+\.\d{10}$")
+            self.assertEqual((self.params / "update").read_text(), "1\n")
+            self.assertTrue(editor.found().curve.same(curve))
+            self.assertFalse(editor.apply_button.isEnabled())         # applied: no changes
+            self.assertIn("✓ Acceleration written directly and read back: "
+                          + curve.describe(), panel.message.text())
+            self.assertIn("does not report whether it accepted", panel.message.text())
+        # The summary and the indicator follow what was read back.
+        self.assertIn("Jump", panel.accel_toggle.summary())
+        self.assertIn("Acceleration: Jump", panel.indicator.detail.text())
+        self.assertIn("Acceleration: Jump", panel.indicator.accessibleName())
+        # One step back: the curve that was active before the last Apply.
+        self.assertTrue(editor.revert_button.isEnabled())
+        editor.revert_button.click()
+        self.assertTrue(editor.found().curve.same(curves[-2]))
+        self.assertEqual(self.accel_state()["AccelerationMode"], "6")
+        # The four directional values were never touched.
+        self.assertEqual((self.params / "DirScaleXPos").read_text(), "1.000000\n")
+
+    def test_a_set_the_driver_cannot_compute_is_refused_before_anything_is_written(self) -> None:
+        window = self.accel_window()
+        panel = window.driver_panel
+        editor = panel.accel_editor
+        before = self.accel_state()
+        bad = accel_edit.make("power", scale=0.5, exponent=0.05, cap=3.0)
+        editor.set_curve(bad)
+        self.assertFalse(editor.apply_button.isEnabled())
+        self.assertTrue(editor.problem_label.isVisibleTo(editor) or editor.problems())
+        self.assertIn("yeetmouse cannot compute", editor.problem_label.text())
+        self.assertIn("Not allowed", editor.accessibleDescription())
+        editor.apply_button.click()
+        panel.apply_accel(bad)                         # even past the button
+        self.assertTrue(panel.message.is_error)
+        self.assertIn("Not written", panel.message.text())
+        self.assertEqual(self.accel_state(), before)
+        self.assertEqual(editor.preview.lines()[0][0], "current")     # no "new" curve drawn
+        # Every spin box stops at the limits of its mode.
+        editor.set_curve(accel_edit.make("classic"))
+        spin = editor.pages["classic"].spins["exponent"]
+        spin.setValue(0.5)
+        self.assertEqual(spin.value(), 1.01)
+        self.assertIn("Exponent", spin.accessibleName())
+        self.assertIn('In yeetmouse this is "Exponent"', spin.toolTip())
+
+    def test_configurations_outside_the_six_modes_are_read_only(self) -> None:
+        cases = {"OutputCap": ("3", "OutputCap is 3"), "Offset": ("2", "Offset is 2"),
+                 "InputCap": ("40", "InputCap is 40"), "PreScale": ("0.8", "PreScale is 0.8"),
+                 "AccelerationMode": ("5", "mode 5")}
+        for name, (text, words) in cases.items():
+            window = self.accel_window(**{name: text})
+            panel = window.driver_panel
+            editor = panel.accel_editor
+            before = self.accel_state()
+            self.assertFalse(editor.found().editable, name)
+            self.assertFalse(editor.editing.isVisibleTo(editor))
+            self.assertIn(words, editor.readonly_label.text())
+            self.assertIn("does not convert it", editor.readonly_label.text())
+            self.assertFalse(editor.apply_button.isEnabled())
+            panel.apply_accel(accel_edit.make("linear"))             # refused at the driver too
+            self.assertIn("does not edit", panel.message.text())
+            self.assertEqual(self.accel_state(), before, name)
+            window.close()
+
+    def test_helper_command_and_a_read_back_that_differs(self) -> None:
+        window = self.accel_window()
+        panel = window.driver_panel
+        curve = accel_edit.make("classic", accel=0.02, exponent=2.5, cap=3.0)
+        fake_pkexec = self.tmp / "pkexec"
+        fake_pkexec.write_text("#!/bin/sh\nexit 0\n")
+        fake_pkexec.chmod(0o755)
+        helper = Path(__file__).resolve().parent.parent / "helper" / "quadsens-apply"
+        driver = Driver(self.params, helper, str(fake_pkexec))
+        command = driver.accel_helper_command(curve)
+        self.assertEqual(command[0], str(fake_pkexec))
+        self.assertTrue(command[1].endswith("quadsens-apply"))
+        self.assertEqual(command[2:], ["accel", "3", "1", "0.0200000000", "2.5000000000",
+                                       "3.0000000000", "1.5000000000"])
+        with self.assertRaises(DriverError):
+            driver.accel_helper_command(accel_edit.make("linear", accel=50))
+        # The module holds something else than what was written: an error, with the way back.
+        with mock.patch.object(Driver, "accel_differences",
+                               return_value=["Midpoint is 1.3, written was 3.0000000000"]):
+            panel.apply_accel(curve)
+        self.assertTrue(panel.message.is_error)
+        self.assertIn("reads back differently", panel.message.text())
+        self.assertIn("Revert to previous", panel.message.text())
+        self.assertIn("read-back differs", panel.indicator.text())
+        self.assertEqual(panel.indicator.property("banner"), "error")
+        self.assertTrue(panel.accel_editor.revert_button.isEnabled())
 
     def test_long_texts_never_widen_the_window(self) -> None:
         """Paths, versions and messages from outside must wrap or elide."""
@@ -790,7 +952,8 @@ class MainWindowTest(unittest.TestCase):
     def test_directions_are_spelled_out(self) -> None:
         window = self.make_window()
         drv = window.driver_panel
-        labels = [w.text() for w in drv.findChildren(QtWidgets.QLabel) if w.buddy() is not None]
+        labels = [w.text() for w in drv.findChildren(QtWidgets.QLabel)
+                  if w.buddy() is not None and not drv.accel_editor.isAncestorOf(w)]
         self.assertEqual(labels, ["→ &Right:", "← &Left:", "↓ &Down:", "↑ &Up:"])
         for spin, name, direction in zip(drv.spins, PARAM_NAMES,
                                          ("right", "left", "down", "up")):
@@ -1574,7 +1737,7 @@ class MainWindowTest(unittest.TestCase):
         self.assertTrue(strip.recheck_button.isVisible())
         self.assertLessEqual(strip.height(), 30)          # about one line of controls
         self.assertTrue(window.steps_bar.next_button.isVisible())
-        self.assertIs(window.centralWidget().layout().itemAt(0).widget(), strip)
+        self.assertIs(window.scroll.widget().layout().itemAt(0).widget(), strip)
         opened: list[str] = []
         window.show_driver_setup = lambda focus="": opened.append(focus)  # type: ignore
         strip.action_requested.disconnect()

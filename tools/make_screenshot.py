@@ -48,6 +48,9 @@ docs/screenshot-windows.png. --windows-missing renders the same window when
 usbip-win2 is not installed and the values come from an imported file.
 Rendered on Linux; both show the layout, not Windows itself.
 
+--accel-editor DIRECTORY renders the acceleration editor in each mode, with a
+refused set and with a read-only configuration (accel-editor-*.png).
+
 --indicators DIRECTORY renders every state of the "is the driver applying
 it" indicator for both platforms (indicator-linux.png, indicator-windows.png).
 
@@ -643,6 +646,54 @@ def indicator_renders(directory: Path) -> None:
         card.close()
 
 
+def accel_editor_renders(directory: Path) -> None:
+    """The acceleration editor: each mode, a refused set and a read-only configuration."""
+    from quadsens import accel_edit as ae
+    from quadsens.ui.accel_editor import AccelEditor
+    app = QtWidgets.QApplication.instance()
+    current = ae.Found(ae.make(ae.LINEAR, accel=0.05, cap=2.0))
+    states = {
+        "off": ae.make(ae.OFF),
+        "linear": ae.make(ae.LINEAR, accel=0.02),
+        "classic": ae.make(ae.CLASSIC, accel=0.02, exponent=2.5, cap=3.0),
+        "power": ae.make(ae.POWER, scale=1.0, exponent=0.3, output_offset=1.0, cap=3.0),
+        "natural": ae.make(ae.NATURAL, decay_rate=0.1, limit=2.0, offset=5.0),
+        "jump": ae.make(ae.JUMP, input=30, output=2.0, smooth=0.5, gain=False),
+        "refused": ae.make(ae.POWER, scale=0.5, exponent=0.05, cap=3.0),
+    }
+    directory.mkdir(parents=True, exist_ok=True)
+
+    def grab(name: str, editor: AccelEditor) -> None:
+        card = Card("acceleration editor")
+        layout = QtWidgets.QVBoxLayout(card)
+        layout.addWidget(editor)
+        card.resize(460, 10)
+        card.show()
+        for _ in range(4):
+            app.processEvents()
+        card.resize(460, max(card.sizeHint().height(), 200))
+        for _ in range(4):
+            app.processEvents()
+        path = directory / ("accel-editor-%s.png" % name)
+        card.grab().save(str(path))
+        print("acceleration editor: %s (%dx%d)" % (path, card.width(), card.height()))
+        card.close()
+
+    for name, curve in states.items():
+        editor = AccelEditor("yeetmouse", "On Linux the four directional values are applied "
+                             "before the curve, on Windows after it.")
+        editor.set_found(current)
+        editor.set_can_revert(name == "classic")
+        editor.set_curve(curve)
+        grab(name, editor)
+    editor = AccelEditor("yeetmouse", "On Linux the four directional values are applied "
+                         "before the curve, on Windows after it.")
+    editor.set_found(ae.Found(reason="OutputCap is 3. QuadSens edits the curve only while it "
+                              "is 0, because it changes the curve in a way RawAccel has no "
+                              "setting for."))
+    grab("readonly", editor)
+
+
 def setup_render(output: Path) -> None:
     """The driver setup dialog for a fixture machine: unmodified driver installed."""
     app = QtWidgets.QApplication.instance()
@@ -687,7 +738,8 @@ def main(argv: list[str]) -> int:
     argv, mode, dark = _options(argv)
     for flag, render in (("--diagrams", None), ("--gallery", None), ("--setup", None),
                          ("--checks", None), ("--windows", None),
-                         ("--windows-missing", None), ("--indicators", None)):
+                         ("--windows-missing", None), ("--indicators", None),
+                         ("--accel-editor", None)):
         if flag in argv:
             rest = [arg for arg in argv if arg != flag]
             if flag == "--setup" and len(rest) < 2:
@@ -712,6 +764,8 @@ def main(argv: list[str]) -> int:
                 setup_render(Path(rest[1]))
             elif flag == "--windows":
                 windows_render(Path(rest[1]), mode)
+            elif flag == "--accel-editor":
+                accel_editor_renders(Path(rest[1]))
             elif flag == "--indicators":
                 indicator_renders(Path(rest[1]))
             elif flag == "--windows-missing":

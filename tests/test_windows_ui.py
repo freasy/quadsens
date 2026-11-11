@@ -28,6 +28,7 @@ except ImportError:  # pragma: no cover - depends on the environment
     raise unittest.SkipTest("no Qt binding (PySide6) installed") from None
 
 from quadsens import (
+    accel_edit,
     emulator,
     rawaccel,
     rawaccel_live,
@@ -1077,7 +1078,8 @@ class ActiveAndAutostartTest(WindowCase):
         self.assertEqual(indicator.property("banner"), "success")
         self.assertRegex(indicator.detail.text(),
                          r"^Applied \d\d:\d\d:\d\d, read back from the driver: output DPI 1011, "
-                         r"Y/X 0\.995054, L/R 0\.980218, U/D 0\.99006\.$")
+                         r"Y/X 0\.995054, L/R 0\.980218, U/D 0\.99006\. ")
+        self.assertIn("acceleration is not read back", indicator.detail.text())
         self.assertIn("Active in driver", indicator.accessibleName())
         self.assertEqual(window.tools_strip.active_label.text(), "✓ Active in driver")
 
@@ -1218,6 +1220,173 @@ class ActiveAndAutostartTest(WindowCase):
         self.assertIn("could not be written", panel.boot_label.text())
         self.assertIn("Access is denied", panel.boot_label.text())
         self.assertEqual(self.registry.values, {})
+
+
+class AccelEditTest(WindowCase):
+    """Editing the acceleration of a RawAccel profile."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.folder / "writer.exe").unlink()          # written at once, also on Windows
+        shutil.copy(FIXTURES / "rawaccel" / "settings-1.7.1-profiles.json", self.settings_file)
+        self.original = self.settings_file.read_bytes()
+
+    def found(self, index: int = 0) -> accel_edit.Found:
+        document = rawaccel.read(self.settings_file)
+        return accel_edit.classify_rawaccel(document.profile(index), document.data)
+
+    def test_collapsed_by_default_with_the_summary(self) -> None:
+        window = self.make()
+        window.show()
+        panel = window.rawaccel_panel
+        self.assertFalse(panel.accel_toggle.isChecked())
+        self.assertFalse(panel.accel_editor.isVisible())
+        self.assertEqual(panel.accel_label.text(), "Acceleration: off")
+        content = window.scroll.widget()
+        self.assertLessEqual(content.minimumSizeHint().height(),
+                             (windows_window.DEFAULT_SIZE[1] - 30) * widths.font_scale(),
+                             widths.report(content))
+        panel.accel_toggle.setChecked(True)
+        _app.processEvents()
+        editor = panel.accel_editor
+        self.assertTrue(editor.isVisible())
+        self.assertEqual(editor.found().curve, accel_edit.make("off"))
+        self.assertIn("after the curve", editor.note_label.text())
+        self.assertIn('In RawAccel this is "exponentClassic"',
+                      editor.pages["classic"].spins["exponent"].toolTip())
+        self.assertEqual(len(window.steps_bar.chips), 5)             # not a step
+
+    def test_each_mode_changes_only_its_tokens_and_restore_puts_every_byte_back(self) -> None:
+        window = self.make()
+        window.show()
+        panel = window.rawaccel_panel
+        editor = panel.accel_editor
+        curves = [accel_edit.make("linear", accel=0.02),
+                  accel_edit.make("classic", accel=0.02, exponent=2.5, cap=3.0),
+                  accel_edit.make("power", exponent=0.3, output_offset=1.0, cap=3.0),
+                  accel_edit.make("natural", limit=2.0, offset=5.0, gain=False),
+                  accel_edit.make("jump", input=30, output=2.0),
+                  accel_edit.make("off")]
+        before = json.loads(self.original)
+        for curve in curves:
+            editor.set_curve(curve)
+            if not editor.apply_button.isEnabled():                  # off is what is there
+                continue
+            self.assertIn("→  New: " + curve.describe(), editor.change_label.text())
+            editor.apply_button.click()
+            self.wait(window)
+            self.assertTrue(self.found().curve.same(curve), curve)
+            after = json.loads(self.settings_file.read_text())
+            # Nothing but the accel arguments of this profile changed, and no key in them
+            # was added or dropped.
+            got = after["profiles"][0].pop(accel_edit.RA_ARGS)
+            want = dict(before["profiles"][0])
+            original_args = want.pop(accel_edit.RA_ARGS)
+            self.assertEqual(after["profiles"][0], want)
+            self.assertEqual(after["profiles"][1:], before["profiles"][1:])
+            self.assertEqual(list(got), list(original_args))
+            self.assertEqual(got["data"], [])
+            self.assertEqual(accel_edit.rawaccel_errors(got), [])
+            self.assertEqual(len(self.settings_file.read_bytes().splitlines()),
+                             len(self.original.splitlines()))
+            # RawAccel has no linear mode of its own: it is classic with exponent 2.
+            name = "classic" if curve.mode == "linear" else curve.mode
+            self.assertIn(name, panel.accel_label.text().lower())
+        self.assertEqual(self.found().curve, accel_edit.make("off"))
+        # A cap that is off is written as 0, not left at the 1.5 another mode had.
+        editor.set_curve(accel_edit.make("linear"))
+        editor.apply_button.click()
+        self.wait(window)
+        args = json.loads(self.settings_file.read_text())["profiles"][0][accel_edit.RA_ARGS]
+        self.assertEqual((args["Cap / Jump"]["y"], args["Cap mode"], args["Gain / Velocity"],
+                          args["exponentClassic"]), (0.0, "output", True, 2.0))
+        # One backup of the untouched file, made at the first change.
+        backups = sorted(self.folder.glob("settings.quadsens-backup-*.json"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), self.original)
+        # Revert: one step back. Restore original: every byte as it was.
+        self.assertTrue(editor.revert_button.isEnabled())
+        editor.revert_button.click()
+        self.wait(window)
+        self.assertEqual(self.found().curve, accel_edit.make("off"))
+        editor.set_curve(accel_edit.make("jump"))
+        editor.apply_button.click()
+        self.wait(window)
+        self.assertTrue(panel.restore_button.isEnabled())
+        self.assertTrue(panel.is_neutral())               # the four values were not touched
+        panel.restore_button.click()
+        self.wait(window)
+        self.assertEqual(self.settings_file.read_bytes(), self.original)
+        self.assertFalse(panel.restore_button.isEnabled())
+        self.assertFalse(editor.revert_button.isEnabled())
+
+    def test_restore_original_covers_values_and_acceleration_together(self) -> None:
+        window = self.make()
+        window.show()
+        panel = window.rawaccel_panel
+        panel.set_values(VALUES)
+        panel.apply_button.click()
+        self.wait(window)
+        panel.accel_editor.set_curve(accel_edit.make("natural", limit=2.0))
+        panel.accel_editor.apply_button.click()
+        self.wait(window)
+        self.assertNotEqual(self.settings_file.read_bytes(), self.original)
+        self.assertAlmostEqual(self.file_values().sens, 1011.0)      # still applied
+        panel.restore_button.click()
+        self.wait(window)
+        self.assertEqual(self.settings_file.read_bytes(), self.original)
+
+    def test_refused_sets_and_read_only_profiles_write_nothing(self) -> None:
+        window = self.make()
+        window.show()
+        panel = window.rawaccel_panel
+        editor = panel.accel_editor
+        bad = accel_edit.make("classic", accel=0.001, exponent=1.01, cap=5.0)
+        editor.set_curve(bad)
+        self.assertFalse(editor.apply_button.isEnabled())
+        self.assertIn("yeetmouse cannot compute", editor.problem_label.text())
+        panel.apply_accel(bad)
+        self.assertIn("Nothing was changed", panel.message.text())
+        self.assertEqual(self.settings_file.read_bytes(), self.original)
+
+        data = json.loads(self.original)
+        data["profiles"][1][accel_edit.RA_ARGS]["Cap mode"] = "input"
+        data["profiles"][2][accel_edit.RA_SPEED][accel_edit.RA_WHOLE] = False
+        self.settings_file.write_text(json.dumps(data, indent=2))
+        changed = self.settings_file.read_bytes()
+        panel.reload()
+        for index, words in ((1, "cap mode"), (2, "by component")):
+            panel.profile_combo.setCurrentIndex(index)
+            self.assertFalse(editor.found().editable)
+            self.assertFalse(editor.editing.isVisibleTo(editor))
+            self.assertIn(words, editor.readonly_label.text())
+            self.assertIn("settings program of RawAccel", editor.readonly_label.text())
+            panel.apply_accel(accel_edit.make("linear"))
+            self.assertIn("does not edit", panel.message.text())
+            self.assertEqual(self.settings_file.read_bytes(), changed)
+        self.assertTrue(panel.settings_button.isEnabled())           # the way to RawAccel
+
+    def test_indicator_names_the_acceleration_read_back(self) -> None:
+        args = dict(json.loads(self.original)["profiles"][1][accel_edit.RA_ARGS])
+        cap = args.pop("Cap / Jump")
+        args.pop("data")
+        items = tuple(args.items()) + (("cap.x", cap["x"]), ("cap.y", cap["y"]))
+        self.live = rawaccel_live.Live(
+            rawaccel_live.OK, (1, 7, 0), (("flick", Four(800.0, 1.1, 0.98, 1.02)),),
+            accels=(("flick", items),))
+        window = self.make()
+        window.show()
+        panel = window.rawaccel_panel
+        panel.profile_combo.setCurrentIndex(1)
+        panel.watch()
+        self.assertIn("Acceleration read back from the driver: Linear: Acceleration 0.005; "
+                      "cap 1.5.", panel.indicator.detail.text())
+        panel.accel_editor.set_curve(accel_edit.make("jump"))
+        panel.accel_editor.apply_button.click()
+        self.wait(window)
+        panel.watch()                    # the stand-in driver still holds the old curve
+        self.assertIn("The driver holds another acceleration than settings.json",
+                      panel.indicator.detail.text())
 
 
 class ImportCleanlinessTest(unittest.TestCase):
