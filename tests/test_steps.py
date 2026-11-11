@@ -118,7 +118,8 @@ class FlowTest(unittest.TestCase):
         for info in infos:
             self.assertTrue(info.detail)
         self.assertEqual(infos[2].action, "")  # happens in the game
-        self.assertEqual(set(ACTIONS), set(Step) - {Step.CALIBRATE})
+        self.assertEqual({step for step in ACTIONS if isinstance(step, Step)},
+                         set(Step) - {Step.CALIBRATE})
 
     def test_save_detail_names_the_loss(self) -> None:
         state = FlowState(driver=RESULT, result_available=True, result_in_editor=True,

@@ -6,6 +6,7 @@ layout around, and a long form with the exact commands for Help > Setup help.
 
 from __future__ import annotations
 
+from .calibration import NO_RESULT, NO_RESULT_FOLDER  # noqa: F401 (kept for importers)
 from .driver import DriverState, DriverStatus
 from .persist import TOOL_NAME, TRUSTED_DIRS, SaveState
 
@@ -22,14 +23,6 @@ FIRST_STEPS: tuple[str, ...] = (
     "Press Apply.",
     "Press Save to config, so that the values survive a module reload.",
 )
-
-NO_RESULT = (
-    "No calibration file found. Run the per-direction calibration in the game; the "
-    "result shows up here.")
-
-NO_RESULT_FOLDER = (
-    "There is no result folder yet. It is created when the game saves its first "
-    "calibration.")
 
 PERSIST = (
     "Applied values last until the yeetmouse module is reloaded (or the next boot). "

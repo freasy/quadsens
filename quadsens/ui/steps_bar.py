@@ -150,18 +150,12 @@ class StepsBar(QtWidgets.QWidget):
         self._waiting = False
         self.infos: list[StepInfo] = []
 
+        self.all_done_text = ALL_DONE
         self.chips: list[StepChip] = []
         self.lines: list[StepLine] = []
-        row = QtWidgets.QHBoxLayout()
+        self._row = row = QtWidgets.QHBoxLayout()
         row.setSpacing(SPACE_S + 2)
-        for index, _step in enumerate(Step):
-            if index:
-                line = StepLine()
-                self.lines.append(line)
-                row.addWidget(line, 1)
-            chip = StepChip()
-            self.chips.append(chip)
-            row.addWidget(chip)
+        self._build(len(Step))
 
         self.next_label = WrapLabel("Next step")
         self.next_button = QtWidgets.QPushButton()
@@ -182,6 +176,23 @@ class StepsBar(QtWidgets.QWidget):
         layout.addLayout(row)
         layout.addLayout(action)
 
+    def _build(self, count: int) -> None:
+        """Create the circles and lines for ``count`` steps (six on Linux, four on Windows)."""
+        while self._row.count():
+            item = self._row.takeAt(0)
+            if item.widget() is not None:
+                item.widget().hide()   # at once: deletion only happens later
+                item.widget().deleteLater()
+        self.chips, self.lines = [], []
+        for index in range(count):
+            if index:
+                line = StepLine()
+                self.lines.append(line)
+                self._row.addWidget(line, 1)
+            chip = StepChip()
+            self.chips.append(chip)
+            self._row.addWidget(chip)
+
     def set_waiting_for_driver(self, waiting: bool) -> None:
         """While the driver check above has not passed, point to it and step aside.
 
@@ -197,6 +208,8 @@ class StepsBar(QtWidgets.QWidget):
 
     def set_steps(self, infos: list[StepInfo]) -> None:
         self.infos = list(infos)
+        if infos and len(infos) != len(self.chips):
+            self._build(len(infos))
         for index, (chip, info) in enumerate(zip(self.chips, infos)):
             chip.set_info(info)
             if index:
@@ -204,7 +217,7 @@ class StepsBar(QtWidgets.QWidget):
                 self.lines[index - 1].update()
         self._current = current = current_step(infos)
         if current is None:
-            self.next_label.setText(ALL_DONE)
+            self.next_label.setText(self.all_done_text)
             self.next_button.setText("Done")
             self.next_button.setEnabled(False)
             self.next_button.setAccessibleName("Next step: nothing left to do")

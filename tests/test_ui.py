@@ -1387,6 +1387,42 @@ class MainWindowTest(unittest.TestCase):
                      "setGraphicsEffect"):
             self.assertNotIn(name, source)
 
+    # ---- values file ------------------------------------------------------------
+
+    def test_export_and_import_of_the_values_file(self) -> None:
+        from quadsens import values_file
+        window = self.make_window()
+        self.assertEqual([window.import_action.text(), window.export_action.text()],
+                         ["&Import values…", "&Export values…"])
+        target = self.tmp / "mine.quadsens.json"
+        self.assertTrue(window.export_values(str(target)))
+        exported = values_file.load(target.read_text())
+        self.assertEqual(exported.scalars, Scalars(1.0375, 0.9625, 1.125, 0.875))
+        self.assertEqual(exported.measured, (1.04, 0.99, 0.93, 1.0, 0.97, 1.02, 1.08, 0.95))
+        self.assertEqual(exported.app_version, quadsens.__version__)
+        text = target.read_text()
+        self.assertNotIn(str(self.tmp), text)          # no path, nothing personal
+        self.assertIn("Exported the four multipliers", window.calibration_panel.message.text())
+
+        other = self.tmp / "other.quadsens.json"
+        other.write_text(values_file.dump(Scalars(1.01, 0.99, 1.02, 0.98)))
+        self.assertTrue(window.import_values(str(other)))
+        self.assertEqual(window.calibration_panel.diagram.scalars(),
+                         Scalars(1.01, 0.99, 1.02, 0.98))
+        self.assertIn("imported values", window.calibration_panel.message.text())
+        window.driver_panel.use_button.click()          # Use result takes the import
+        self.assertEqual(window.driver_panel.values(), Scalars(1.01, 0.99, 1.02, 0.98))
+        self.assertIn("imported values file", window.driver_panel.message.text())
+        self.new_result(window)                         # a newer result file wins again
+        self.assertEqual(window.calibration_panel.diagram.scalars(),
+                         Scalars(1.0375, 0.9625, 1.125, 0.875))
+
+        bad = self.tmp / "bad.json"
+        bad.write_text("{}")
+        self.assertFalse(window.import_values(str(bad)))
+        self.assertTrue(window.calibration_panel.message.is_error)
+        self.assertIn("not a QuadSens values file", window.calibration_panel.message.text())
+
     # ---- driver check on the front ------------------------------------------------
 
     def test_driver_check_passed_is_one_quiet_line(self) -> None:

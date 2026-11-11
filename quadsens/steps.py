@@ -28,6 +28,15 @@ class Step(enum.Enum):
     SAVE = 6
 
 
+class WinStep(enum.Enum):
+    """The shorter flow on Windows: there the values are only applied."""
+
+    VALUES = 1
+    FOLDER = 2
+    PREVIEW = 3
+    APPLY = 4
+
+
 class Status(enum.Enum):
     DONE = "done"
     CURRENT = "current"
@@ -44,6 +53,10 @@ SHORT_TITLES = {
     Step.USE: "Use result",
     Step.APPLY: "Apply",
     Step.SAVE: "Save",
+    WinStep.VALUES: "Get values",
+    WinStep.FOLDER: "RawAccel folder",
+    WinStep.PREVIEW: "Preview",
+    WinStep.APPLY: "Apply",
 }
 TITLES = {
     Step.START: "Start the virtual mouse",
@@ -52,6 +65,10 @@ TITLES = {
     Step.USE: "Use the result",
     Step.APPLY: "Apply to the driver",
     Step.SAVE: "Save to config",
+    WinStep.VALUES: "Get the four multipliers",
+    WinStep.FOLDER: "Choose the RawAccel folder",
+    WinStep.PREVIEW: "Look at the preview",
+    WinStep.APPLY: "Apply to RawAccel",
 }
 # Label of the button that carries out a step; CALIBRATE happens in the game.
 ACTIONS = {
@@ -60,6 +77,9 @@ ACTIONS = {
     Step.USE: "Use result",
     Step.APPLY: "Apply",
     Step.SAVE: "Save to config",
+    WinStep.VALUES: "Use result",
+    WinStep.FOLDER: "Choose folder…",
+    WinStep.APPLY: "Apply",
 }
 
 
@@ -82,7 +102,7 @@ class FlowState:
 
 @dataclass(frozen=True)
 class StepInfo:
-    step: Step
+    step: Step | WinStep
     status: Status
     detail: str          # one sentence: what to do, or what was found
     blocked: str = ""    # why the step's action cannot work right now, or ""
@@ -107,7 +127,8 @@ class StepInfo:
 
     def describe(self) -> str:
         """Full form for screen readers and tooltips."""
-        text = f"Step {self.number} of {len(Step)}, {TITLES[self.step]}: {self.status.value}."
+        total = len(type(self.step))
+        text = f"Step {self.number} of {total}, {TITLES[self.step]}: {self.status.value}."
         return f"{text} {self.detail}" if self.detail else text
 
 
@@ -209,6 +230,61 @@ def current_step(steps: list[StepInfo]) -> StepInfo | None:
     return None
 
 
+@dataclass(frozen=True)
+class WinFlowState:
+    """What the Windows steps depend on."""
+
+    values_ready: bool = False       # the multipliers to apply are not all 1.0
+    result_available: bool = False   # a result file or an import could fill them
+    folder_ok: bool = False          # a RawAccel settings file is loaded and understood
+    folder_problem: str = ""         # why not, "" if no folder was chosen yet
+    applied: bool = False            # the settings file holds the new values
+
+
+def derive_windows(state: WinFlowState) -> list[StepInfo]:
+    """The four Windows steps; the first one that is not done is the current one."""
+    ready = state.values_ready and state.folder_ok
+    done = {
+        WinStep.VALUES: state.values_ready,
+        WinStep.FOLDER: state.folder_ok,
+        WinStep.PREVIEW: ready,
+        WinStep.APPLY: ready and state.applied,
+    }
+    details = {
+        WinStep.VALUES: ("The four multipliers are set." if state.values_ready
+                         else "Take the newest result, import a values file, or type the "
+                              "four multipliers."),
+        WinStep.FOLDER: ("The RawAccel settings are loaded." if state.folder_ok
+                         else state.folder_problem or "Choose the folder where rawaccel.exe "
+                                                      "and settings.json are."),
+        WinStep.PREVIEW: ("The table shows what changes: current and new." if ready
+                          else "Shows current and new settings once values and folder "
+                               "are there."),
+        WinStep.APPLY: ("RawAccel's settings hold the new values." if done[WinStep.APPLY]
+                        else "Write the new settings and let RawAccel load them."),
+    }
+    blocked = {
+        WinStep.VALUES: "" if state.result_available else
+        "There is no result to take; import a values file or type the multipliers.",
+        WinStep.FOLDER: "",
+        WinStep.PREVIEW: "",
+        WinStep.APPLY: "" if state.folder_ok else "Choose the RawAccel folder first.",
+    }
+    steps: list[StepInfo] = []
+    current_given = False
+    for step in WinStep:
+        if done[step]:
+            status = Status.DONE
+        elif not current_given:
+            status, current_given = Status.CURRENT, True
+        else:
+            status = Status.PENDING
+        steps.append(StepInfo(step, status, details[step],
+                              "" if done[step] else blocked[step]))
+    return steps
+
+
+WIN_ALL_DONE = "All four steps are done: RawAccel's settings hold your multipliers."
 FIX_DRIVER = "driver-setup"
 FIX_ACTIONS = {FIX_DRIVER: "Driver setup…"}
 ALL_DONE = "All six steps are done: the calibration is applied and saved."

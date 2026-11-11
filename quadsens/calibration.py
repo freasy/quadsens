@@ -113,6 +113,13 @@ def driver_scalars(firmware: Scalars, flip_y: bool = False) -> Scalars:
     return firmware.flipped_y() if flip_y else firmware
 
 
+NO_RESULT = (
+    "No calibration file found. Run the per-direction calibration in the game; the "
+    "result shows up here.")
+NO_RESULT_FOLDER = (
+    "There is no result folder yet. It is created when the game saves its first "
+    "calibration.")
+SOURCE_IMPORT = "the imported values file"
 SOURCE_FILE = "the result file"
 SOURCE_MOUSE = "the values sent to the virtual mouse"
 
@@ -127,7 +134,8 @@ class Result:
 
 
 def pick_result(calibration: Calibration | None, written: Scalars | None = None,
-                written_time: float | None = None) -> Result | None:
+                written_time: float | None = None, imported: Scalars | None = None,
+                imported_time: float | None = None) -> Result | None:
     """Choose between the result file and the values a client wrote to the mouse.
 
     The newer of the two wins; values outside the allowed range are not a result.
@@ -137,6 +145,8 @@ def pick_result(calibration: Calibration | None, written: Scalars | None = None,
         candidates.append(Result(calibration.firmware, SOURCE_FILE, calibration.mtime))
     if written is not None and written_time is not None:
         candidates.append(Result(written, SOURCE_MOUSE, written_time))
+    if imported is not None and imported_time is not None:
+        candidates.append(Result(imported, SOURCE_IMPORT, imported_time))
     usable = []
     for candidate in candidates:
         try:

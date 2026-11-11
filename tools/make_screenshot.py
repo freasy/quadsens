@@ -8,6 +8,7 @@ Usage: python3 tools/make_screenshot.py [--theme quadsens|system] [--dark]
        python3 tools/make_screenshot.py [--theme ...] [--dark] --gallery DIRECTORY
        python3 tools/make_screenshot.py [--theme ...] [--dark] --setup OUTPUT.png
        python3 tools/make_screenshot.py [--theme ...] [--dark] --checks DIRECTORY
+       python3 tools/make_screenshot.py [--theme ...] [--dark] --windows OUTPUT.png
 
 Uses a temp directory in place of sysfs and of the config file, a made-up
 calibration file and a stand-in for yeetmousectl. It does not create the uhid
@@ -38,6 +39,11 @@ unmodified driver installed (default output: docs/screenshot-driver-setup.png).
 fixable, log in again, prerequisites missing) into DIRECTORY, each also at the
 minimum window size. Without DIRECTORY it writes only the fixable state, to
 docs/screenshot-driver-check.png.
+
+--windows renders the window as it is composed on Windows (values in, RawAccel
+settings out), with a made-up RawAccel folder and an imported values file,
+before Apply. Default output: docs/screenshot-windows.png. Rendered on Linux;
+it shows the layout, not Windows itself.
 
 The calibration data is made up but consistent: the four multipliers are the
 1-2-1 weighted averages of the eight measured values, a few percent around 1.
@@ -450,6 +456,56 @@ def check_renders(directory: Path | None, mode: str) -> None:
             window.close()
 
 
+def windows_render(output: Path, mode: str, size: tuple[int, int] = (900, 640)) -> None:
+    """The Windows composition with fixture data: values imported, preview shown."""
+    from quadsens import values_file
+    from quadsens.ui.windows_window import WindowsMainWindow
+    app = QtWidgets.QApplication.instance()
+    with tempfile.TemporaryDirectory(prefix="quadsens-demo-") as tmp:
+        folder = Path(tmp, "RawAccel")
+        folder.mkdir()
+        shutil.copy(ROOT / "tests" / "fixtures" / "rawaccel" / "settings-1.7.1-default.json",
+                    folder / "settings.json")
+        (folder / "writer.exe").write_text("#!/bin/sh\nexit 0\n")
+        (folder / "writer.exe").chmod(0o755)
+        demo = demo_calibration()
+        scalars = demo["firmwareScalars"]
+        values = Path(tmp, "multipliers.quadsens.json")
+        values.write_text(values_file.dump(
+            Scalars(scalars["XPos"], scalars["XNeg"], scalars["YPos"], scalars["YNeg"]),
+            tuple(demo["directionalScalars"]), "demo"))
+        settings = QtCore.QSettings(str(Path(tmp, "settings.ini")),
+                                    QtCore.QSettings.Format.IniFormat)
+        settings.setValue("ui/theme", mode)
+        window = WindowsMainWindow(settings, str(Path(tmp, "none", "*", "x.json")),
+                                   {"USERPROFILE": str(Path(tmp, "profile")),
+                                    "SystemDrive": str(Path(tmp, "nodrive"))})
+        window.resize(*size)
+        window.show()
+        assert window.import_values(str(values))
+        window.rawaccel_panel.set_folder("C:\\Tools\\RawAccel", remember=False)
+        window.rawaccel_panel.folder = folder      # shown as a Windows path, read from here
+        window.rawaccel_panel.reload()
+        window.rawaccel_panel.message.show_message("")
+        window.calibration_panel.message.show_message(
+            "Showing the imported values. A newer result file replaces them.")
+        for _ in range(6):
+            app.processEvents()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        window.grab().save(str(output))
+        hint = window.minimumSizeHint()
+        print("windows composition: %s (minimum %dx%d)" % (output, hint.width(),
+                                                           hint.height()))
+        window.rawaccel_panel.apply()
+        deadline = time.monotonic() + 10
+        while window.rawaccel_panel.is_busy() and time.monotonic() < deadline:
+            app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 20)
+        assert window.rawaccel_panel.is_applied(), window.rawaccel_panel.message.text()
+        if output.parent != ROOT / "docs":
+            window.grab().save(str(output.with_name(output.stem + "-applied.png")))
+        window.close()
+
+
 def setup_render(output: Path) -> None:
     """The driver setup dialog for a fixture machine: unmodified driver installed."""
     app = QtWidgets.QApplication.instance()
@@ -493,13 +549,15 @@ def _options(argv: list[str]) -> tuple[list[str], str, bool]:
 def main(argv: list[str]) -> int:
     argv, mode, dark = _options(argv)
     for flag, render in (("--diagrams", None), ("--gallery", None), ("--setup", None),
-                         ("--checks", None)):
+                         ("--checks", None), ("--windows", None)):
         if flag in argv:
             rest = [arg for arg in argv if arg != flag]
             if flag == "--setup" and len(rest) < 2:
                 rest.append(str(ROOT / "docs" / "screenshot-driver-setup.png"))
             if flag == "--checks" and len(rest) < 2:
                 rest.append("")
+            if flag == "--windows" and len(rest) < 2:
+                rest.append(str(ROOT / "docs" / "screenshot-windows.png"))
             if len(rest) < 2:
                 print("usage: make_screenshot.py %s DIRECTORY" % flag, file=sys.stderr)
                 return 2
@@ -514,6 +572,8 @@ def main(argv: list[str]) -> int:
                 diagram_renders(Path(rest[1]))
             elif flag == "--setup":
                 setup_render(Path(rest[1]))
+            elif flag == "--windows":
+                windows_render(Path(rest[1]), mode)
             elif flag == "--checks":
                 check_renders(Path(rest[1]) if rest[1] else None, mode)
             else:

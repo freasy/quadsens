@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING
 
+from .. import __version__, values_file
 from ..calibration import (
     DIRECTION_LABELS,
+    NO_RESULT,
+    SOURCE_FILE,
+    SOURCE_IMPORT,
     Calibration,
     CalibrationError,
     Result,
@@ -16,8 +21,9 @@ from ..calibration import (
     pick_result,
     watch_paths,
 )
-from ..emulator import DirectionalWrites
-from ..hints import NO_RESULT
+
+if TYPE_CHECKING:  # the emulator is Linux-only and must not be imported on Windows
+    from ..emulator import DirectionalWrites
 from .compass import DirectionDiagram
 from .qt import QtCore, QtWidgets, Signal
 from .status import (
@@ -45,12 +51,16 @@ class CalibrationPanel(Card):
     calibration_changed = Signal()
 
     def __init__(self, pattern: str, settings: QtCore.QSettings | None = None,
-                 parent: QtWidgets.QWidget | None = None) -> None:
+                 parent: QtWidgets.QWidget | None = None,
+                 no_result_text: str = NO_RESULT) -> None:
         super().__init__("Calibration result", parent)
         self._pattern = pattern
         self._settings = settings
         self._flip_y = False
-        self._writes = DirectionalWrites()
+        self._writes: DirectionalWrites | None = None
+        self._no_result_text = no_result_text
+        self._imported: values_file.Values | None = None
+        self._imported_time: float | None = None
         self.calibration: Calibration | None = None
 
         self.path_edit = QtWidgets.QLineEdit()
@@ -149,7 +159,43 @@ class CalibrationPanel(Card):
 
     def result(self) -> Result | None:
         """The result to take values from: the file or what was sent to the mouse."""
-        return pick_result(self.calibration, self._writes.scalars(), self._writes.updated)
+        written = self._writes.scalars() if self._writes is not None else None
+        written_time = self._writes.updated if self._writes is not None else None
+        imported = self._imported.scalars if self._imported is not None else None
+        return pick_result(self.calibration, written, written_time, imported,
+                           self._imported_time)
+
+    def import_values(self, text: str) -> values_file.Values:
+        """Take the multipliers of a QuadSens values file as the result to work with.
+
+        Raises values_file.ValuesError if the text is not a usable values file.
+        """
+        values = values_file.load(text)
+        self._imported = values
+        self._imported_time = time.time()
+        self._show_result()
+        self.message.show_message(
+            "Showing the imported values%s. A newer result file replaces them."
+            % (f" (written {values.created})" if values.created else ""))
+        self.calibration_changed.emit()
+        return values
+
+    def export_text(self) -> str:
+        """The current result as a QuadSens values file.
+
+        The four multipliers are written as they go to the driver: right, left,
+        down, up. Raises values_file.ValuesError when there is nothing to export.
+        """
+        result = self.result()
+        if result is None:
+            raise values_file.ValuesError("there is no result to export yet")
+        measured = None
+        if result.source == SOURCE_FILE and self.calibration is not None:
+            measured = self.calibration.directional
+        elif result.source == SOURCE_IMPORT and self._imported is not None:
+            measured = self._imported.measured
+        return values_file.dump(driver_scalars(result.scalars, self._flip_y), measured,
+                                __version__)
 
     def set_flip_y(self, flip: bool) -> None:
         """Show the multipliers with the two Y directions exchanged."""
@@ -160,6 +206,9 @@ class CalibrationPanel(Card):
         result = self.result()
         self.diagram.set_scalars(
             driver_scalars(result.scalars, self._flip_y) if result is not None else None)
+        if result is not None and result.source == SOURCE_IMPORT \
+                and self._imported is not None:
+            self.diagram.set_values(self._imported.measured)
 
     def refresh(self) -> None:
         """Re-read the newest calibration file and re-arm the file watcher."""
@@ -199,8 +248,8 @@ class CalibrationPanel(Card):
             self.directional_label.setText("")
             if error:
                 self.message.show_message(error, error=True)
-            else:
-                self.message.show_message(NO_RESULT)
+            elif self._imported is None:
+                self.message.show_message(self._no_result_text)
         self._show_result()
         self._rearm_watcher()
         self.calibration_changed.emit()
