@@ -5,6 +5,53 @@ from __future__ import annotations
 from .qt import QtCore, QtGui, QtWidgets
 
 
+# One spacing scale for the whole window.
+SPACE_S, SPACE_M, SPACE_L = 4, 8, 14
+
+
+def heading(text: str) -> QtWidgets.QLabel:
+    """Section heading: bold, slightly larger than the body text."""
+    label = QtWidgets.QLabel(text)
+    font = label.font()
+    font.setBold(True)
+    font.setPointSizeF(font.pointSizeF() * 1.08)
+    label.setFont(font)
+    return label
+
+
+def column_header(text: str) -> QtWidgets.QLabel:
+    label = QtWidgets.QLabel(text)
+    font = label.font()
+    font.setBold(True)
+    label.setFont(font)
+    return label
+
+
+class Disclosure(QtWidgets.QToolButton):
+    """Arrow button that shows or hides a part of the window.
+
+    The arrow points right while the part is hidden and down while it is shown;
+    the checked state carries the same information for assistive technology.
+    """
+
+    def __init__(self, text: str, target: QtWidgets.QWidget,
+                 parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._target = target
+        self.setText(text)
+        self.setCheckable(True)
+        self.setAutoRaise(True)
+        self.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.setFocusPolicy(QtCore.Qt.FocusPolicy.TabFocus)
+        self.toggled.connect(self._apply)
+        self._apply(False)
+
+    def _apply(self, shown: bool) -> None:
+        self.setArrowType(QtCore.Qt.ArrowType.DownArrow if shown
+                          else QtCore.Qt.ArrowType.RightArrow)
+        self._target.setVisible(shown)
+
+
 class StatusDot(QtWidgets.QWidget):
     """A round marker: hollow = off, half tone = waiting, filled = active.
 

@@ -3,8 +3,10 @@
 
 Usage: python3 tools/make_screenshot.py [--dark] [OUTPUT.png] [WIDTHxHEIGHT]
 
-Uses a temp directory in place of sysfs and a copy of the fixture calibration
-file. It does not create the uhid device, run pkexec or touch /sys. The window
+Uses a temp directory in place of sysfs and of the config file, a copy of the
+fixture calibration file and a stand-in for yeetmousectl. It does not create
+the uhid device, run pkexec or touch /sys or /etc. The picture shows the
+window after Use result and Apply, with Save to config as the next step. The window
 shows fixture data only; the one path it displays is below a neutral temp
 directory. --dark renders with a dark palette instead of the default one.
 """
@@ -16,6 +18,7 @@ import shutil
 import struct
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -24,6 +27,8 @@ sys.path.insert(0, str(ROOT))
 
 from quadsens import emulator  # noqa: E402
 from quadsens.driver import PARAM_NAMES, Driver  # noqa: E402
+from quadsens.persist import SaveState, Saver  # noqa: E402
+from quadsens.steps import Step  # noqa: E402
 from quadsens.ui.main_window import MainWindow  # noqa: E402
 from quadsens.ui.qt import BINDING, QtCore, QtGui, QtWidgets  # noqa: E402
 
@@ -52,7 +57,7 @@ def main(argv: list[str]) -> int:
     argv = [arg for arg in argv if arg != "--dark"]
     default_name = "screenshot-dark.png" if dark else "screenshot.png"
     output = Path(argv[1]) if len(argv) > 1 else ROOT / "docs" / default_name
-    width, height = (int(n) for n in (argv[2] if len(argv) > 2 else "900x660").split("x"))
+    width, height = (int(n) for n in (argv[2] if len(argv) > 2 else "860x600").split("x"))
     QtCore.QLocale.setDefault(QtCore.QLocale.c())
     app = QtWidgets.QApplication([argv[0]])
     app.setStyle("Fusion")
@@ -75,22 +80,32 @@ def main(argv: list[str]) -> int:
         settings = QtCore.QSettings(str(Path(tmp, "settings.ini")),
                                     QtCore.QSettings.Format.IniFormat)
 
-        window = MainWindow(settings, pattern, Driver(params), None, uhid_path=str(uhid))
+        config = Path(tmp, "yeetmouse.conf")
+        config.write_text("sens=1\n", encoding="ascii")
+        os.environ["QUADSENS_FAKE_PARAMS"] = str(params)
+        saver = Saver(config, tool=ROOT / "tests" / "fake_yeetmousectl.py")
+
+        window = MainWindow(settings, pattern, Driver(params), None, uhid_path=str(uhid),
+                            saver=saver)
         window.resize(width, height)
         window.show()
 
-        # Exercise refresh, use-calibration, flip-Y and apply against the fixtures.
+        # Exercise the guided steps against the fixtures: use, flip Y, apply, save.
         window.calibration_panel.refresh()
         assert window.calibration_panel.calibration is not None
         drv = window.driver_panel
-        drv.use_button.click()
+        window.run_step(Step.USE)
         before = drv.values()
         drv.flip_check.setChecked(True)
         assert drv.values() == before.flipped_y(), "flip Y did not exchange the values"
         drv.flip_check.setChecked(False)
-        drv.apply_button.click()
+        drv.advanced_toggle.setChecked(False)
+        window.run_step(Step.APPLY)
         assert (params / "update").read_text() == "1\n", "apply did not reach the driver dir"
         assert drv.state.scalars is not None and drv.state.scalars.is_close(before)
+        assert window.steps_bar.current().step is Step.SAVE
+        capture = lambda: (app.processEvents(), window.grab())[1]  # noqa: E731
+        picture = None
 
         # Feed the log view the way the device would, without opening /dev/uhid.
         device = emulator.BragiDevice(log=window.mouse_panel._on_entry)
@@ -101,9 +116,20 @@ def main(argv: list[str]) -> int:
             device.handle(bytes([0, 1, 1, emulator.CMD_SET]) + struct.pack("<Hf", prop, value))
         device.handle(bytes([0, 1, 1, emulator.CMD_SET]) + struct.pack("<HI", 0x129, 1))
 
-        app.processEvents()
+        for _ in range(5):
+            app.processEvents()
+        picture = capture()
+
+        # The save itself, after the picture: the stand-in tool writes the config.
+        window.run_step(Step.SAVE)
+        deadline = time.monotonic() + 10
+        while drv.is_busy() and time.monotonic() < deadline:
+            app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 50)
+        assert drv.save_state is SaveState.SAVED, drv.message.text()
+        assert window.steps_bar.current() is None, "not all steps are done after the save"
+
         output.parent.mkdir(parents=True, exist_ok=True)
-        if not window.grab().save(str(output)):
+        if not picture.save(str(output)):
             print("could not write %s" % output, file=sys.stderr)
             return 1
         hint = window.minimumSizeHint()

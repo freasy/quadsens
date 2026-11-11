@@ -1,8 +1,9 @@
-"""Main window: virtual mouse on top, calibration and driver below."""
+"""Main window: the steps on top, then the virtual mouse, the result and the driver."""
 
 from __future__ import annotations
 
 import html
+import time
 from collections.abc import Callable
 
 from .. import about
@@ -15,14 +16,26 @@ from ..emulator import (
     LogEntry,
     uhid_access,
 )
-from ..hints import FIRST_STEPS, NO_RESULT_FOLDER, PERSIST
+from ..hints import (
+    FIRST_STEPS,
+    NO_RESULT_FOLDER,
+    PERSIST,
+    setup_problems,
+    tool_missing,
+    uhid_short,
+)
+from ..model import Scalars
+from ..persist import Saver
+from ..steps import FlowState, Step, StepInfo, derive, is_unity
 from .calibration_panel import CalibrationPanel
-from .driver_panel import DriverPanel
+from .driver_panel import SAME_VALUE, DriverPanel
 from .icon import app_icon
 from .mouse_panel import MousePanel
 from .qt import QtCore, QtGui, QtWidgets
+from .status import SPACE_L, SPACE_M
+from .steps_bar import StepsBar
 
-MARGIN = 8
+DEFAULT_SIZE = (860, 600)
 
 
 def about_html() -> str:
@@ -34,14 +47,26 @@ def about_html() -> str:
             f"<p>{disclaimer}</p>")
 
 
+def _separator() -> QtWidgets.QFrame:
+    line = QtWidgets.QFrame()
+    line.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+    line.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
+    return line
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, settings: QtCore.QSettings, calibration_glob: str, driver: Driver,
                  emulator_state_path: str | None = None,
                  parent: QtWidgets.QWidget | None = None,
-                 uhid_path: str = UHID_PATH) -> None:
+                 uhid_path: str = UHID_PATH, saver: Saver | None = None) -> None:
         super().__init__(parent)
         self._settings = settings
         self._calibration_glob = calibration_glob
+        self._driver = driver
+        # A result counts as new when it is younger than this: the moment the
+        # virtual mouse was started or the driver was reset to 1.0, whichever
+        # came last. None until one of the two happened in this session.
+        self._baseline: float | None = None
         self.info_box: QtWidgets.QMessageBox | None = None
         # Replaceable, so that tests do not start a file manager.
         self.open_url: Callable[[QtCore.QUrl], object] = QtGui.QDesktopServices.openUrl
@@ -52,37 +77,55 @@ class MainWindow(QtWidgets.QMainWindow):
             return EmulatorSession(product_id=pid, state_path=emulator_state_path,
                                    on_log=on_log, uhid_path=uhid_path)
 
-        self.mouse_panel = MousePanel(make_session, lambda: uhid_access(uhid_path))
-        self.calibration_panel = CalibrationPanel(calibration_glob)
-        self.driver_panel = DriverPanel(driver, settings,
-                                        lambda: self.calibration_panel.calibration)
-        self.mouse_panel.writes_changed.connect(
-            lambda: self.calibration_panel.set_emulator_writes(self.mouse_panel.writes))
+        self.steps_bar = StepsBar()
+        self.mouse_panel = MousePanel(make_session, lambda: uhid_access(uhid_path), settings)
+        self.calibration_panel = CalibrationPanel(calibration_glob, settings)
+        self.driver_panel = DriverPanel(driver, settings, self.calibration_panel.result,
+                                        saver)
+        self.calibration_panel.set_flip_y(self.driver_panel.flip_y())
 
-        lower = QtWidgets.QHBoxLayout()
-        lower.setSpacing(MARGIN)
-        lower.addWidget(self.calibration_panel, 3)
-        lower.addWidget(self.driver_panel, 2)
+        self._lower = QtWidgets.QHBoxLayout()
+        self._lower.setSpacing(SPACE_L + SPACE_M)
+        self._lower.addWidget(self.calibration_panel, 1)
+        self._lower.addWidget(self.driver_panel, 1)
 
         central = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(central)
-        layout.setContentsMargins(MARGIN, MARGIN, MARGIN, MARGIN)
-        layout.setSpacing(MARGIN)
-        layout.addWidget(self.mouse_panel, 1)
-        layout.addLayout(lower)
+        self._layout = layout = QtWidgets.QVBoxLayout(central)
+        layout.setContentsMargins(SPACE_L, SPACE_M, SPACE_L, SPACE_M)
+        layout.setSpacing(SPACE_M)
+        layout.addWidget(self.steps_bar)
+        layout.addWidget(_separator())
+        layout.addWidget(self.mouse_panel)
+        layout.addWidget(_separator())
+        layout.addLayout(self._lower)
         self.setCentralWidget(central)
 
         self._build_menus()
-        # Keyboard order follows the workflow: mouse, calibration, driver.
+
+        self.mouse_panel.writes_changed.connect(
+            lambda: self.calibration_panel.set_emulator_writes(self.mouse_panel.writes))
+        self.mouse_panel.running_changed.connect(self._mouse_running_changed)
+        self.mouse_panel.log_toggle.toggled.connect(self._share_space)
+        self.calibration_panel.calibration_changed.connect(self.update_steps)
+        self.driver_panel.changed.connect(self.update_steps)
+        self.driver_panel.applied.connect(self._driver_applied)
+        self.driver_panel.flip_changed.connect(self.calibration_panel.set_flip_y)
+        self.steps_bar.action_requested.connect(self.run_step)
+
+        # Keyboard order follows the workflow: next step, mouse, result, driver.
         order: list[QtWidgets.QWidget] = [
-            self.mouse_panel.pid_combo, self.mouse_panel.toggle_button,
+            self.steps_bar.next_button,
+            self.mouse_panel.toggle_button, self.mouse_panel.pid_combo,
+            self.mouse_panel.log_toggle, self.mouse_panel.log_view,
             self.mouse_panel.copy_button, self.mouse_panel.clear_button,
-            self.mouse_panel.log_view,
+            self.calibration_panel.details_toggle,
             self.calibration_panel.path_edit, self.calibration_panel.refresh_button,
+            self.driver_panel.advanced_toggle,
             *self.driver_panel.spins,
-            self.driver_panel.use_button, self.driver_panel.flip_check,
-            self.driver_panel.reset_button, self.driver_panel.read_button,
-            self.driver_panel.apply_button, self.driver_panel.auto_check,
+            self.driver_panel.use_button, self.driver_panel.reset_button,
+            self.driver_panel.read_button, self.driver_panel.apply_button,
+            self.driver_panel.save_button,
+            self.driver_panel.flip_check, self.driver_panel.auto_check,
         ]
         for first, second in zip(order, order[1:]):
             QtWidgets.QWidget.setTabOrder(first, second)
@@ -90,10 +133,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.mouse_panel.set_product_id(
             int(settings.value("emulator/pid", DEFAULT_PRODUCT_ID, type=int)))
-        self.resize(900, 660)
+        self._share_space(self.mouse_panel.log_shown())
+        self.update_steps()
+        self.resize(*DEFAULT_SIZE)
         geometry = settings.value("window/geometry")
         if isinstance(geometry, QtCore.QByteArray) and not geometry.isEmpty():
             self.restoreGeometry(geometry)
+
+    def _share_space(self, log_shown: bool) -> None:
+        """Spare height goes to the log while it is shown, else to the lower half."""
+        self._layout.setStretchFactor(self.mouse_panel, 1 if log_shown else 0)
+        self._layout.setStretchFactor(self._lower, 0 if log_shown else 1)
 
     # ---- menus ------------------------------------------------------------
 
@@ -117,6 +167,9 @@ class MainWindow(QtWidgets.QMainWindow):
             QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.HelpContents))
         self.steps_action.triggered.connect(self.show_first_steps)
         help_menu.addAction(self.steps_action)
+        self.setup_action = QtGui.QAction("&Setup help", self)
+        self.setup_action.triggered.connect(self.show_setup_help)
+        help_menu.addAction(self.setup_action)
         help_menu.addSeparator()
         self.about_action = QtGui.QAction("&About %s" % about.APP_NAME, self)
         self.about_action.setMenuRole(QtGui.QAction.MenuRole.AboutRole)
@@ -133,6 +186,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self._open_box("First steps", "<h3>First steps</h3><ol>%s</ol><p>%s</p>" % (
             "".join("<li>%s</li>" % html.escape(step) for step in FIRST_STEPS),
             html.escape(PERSIST)))
+
+    def setup_problems(self) -> list[str]:
+        """Everything that is not set up yet, each with what to do about it."""
+        panel = self.driver_panel
+        return setup_problems(self.mouse_panel.check_access(), panel.state,
+                              self._driver.helper_installed(), panel.tool_found())
+
+    def show_setup_help(self) -> None:
+        problems = self.setup_problems()
+        if problems:
+            body = "<p>These parts are not ready:</p><ul>%s</ul>" % "".join(
+                "<li>%s</li>" % html.escape(text) for text in problems)
+        else:
+            body = ("<p>Nothing to fix: the virtual mouse can be created, the driver "
+                    "values are readable and the save tool is installed.</p>")
+        self._open_box("Setup help", "<h3>Setup help</h3>%s<p>The README section "
+                       "\"One-time setup\" has the details.</p>" % body)
 
     def open_result_folder(self) -> None:
         """Open the folder of the newest result file in the file manager."""
@@ -164,11 +234,75 @@ class MainWindow(QtWidgets.QMainWindow):
         if box is not None:
             box.deleteLater()
 
+    # ---- guided steps -----------------------------------------------------
+
+    def _mouse_running_changed(self, running: bool) -> None:
+        if running:
+            self._baseline = time.time()
+        self.update_steps()
+
+    def _driver_applied(self, scalars: Scalars) -> None:
+        if is_unity(scalars):
+            # Back to the raw mouse: only a calibration from now on is a new one.
+            self._baseline = time.time()
+        self.update_steps()
+
+    def flow_state(self) -> FlowState:
+        """The facts the step display is derived from."""
+        mouse, panel = self.mouse_panel, self.driver_panel
+        result = self.calibration_panel.result()
+        wanted = panel.result_values()
+        driver = panel.driver_values()
+        return FlowState(
+            mouse_running=mouse.is_running(),
+            mouse_problem=uhid_short(mouse.access()),
+            driver=driver,
+            driver_problem=panel.write_problem(),
+            result_available=wanted is not None,
+            result_is_new=(result is not None and self._baseline is not None
+                           and result.time > self._baseline),
+            result_in_editor=wanted is not None and panel.values().is_close(
+                wanted, SAME_VALUE),
+            result_in_driver=(wanted is not None and driver is not None
+                              and driver.is_close(wanted, SAME_VALUE)),
+            save_state=panel.save_state,
+            save_problem="" if panel.tool_found() else tool_missing(),
+        )
+
+    def update_steps(self) -> list[StepInfo]:
+        infos = derive(self.flow_state())
+        self.steps_bar.set_steps(infos)
+        if self.driver_panel.is_busy():
+            self.steps_bar.next_button.setEnabled(False)
+        return infos
+
+    def run_step(self, step: Step) -> None:
+        """Carry out the action of a step, as the button in its panel would."""
+        if step is Step.START:
+            self.mouse_panel.start()
+        elif step is Step.RESET:
+            self.driver_panel.reset_and_apply()
+        elif step is Step.USE:
+            self.driver_panel.use_calibration()
+        elif step is Step.APPLY:
+            self.driver_panel.apply()
+        elif step is Step.SAVE:
+            self.driver_panel.save_config()
+        self.update_steps()
+
     # ---- life cycle -------------------------------------------------------
 
     def apply_saved_if_enabled(self) -> None:
         if self.driver_panel.auto_check.isChecked():
             self.driver_panel.apply_saved()
+
+    def changeEvent(self, event: QtCore.QEvent) -> None:  # noqa: N802 (Qt name)
+        super().changeEvent(event)
+        # Permissions may have been fixed while the window was in the background.
+        if (event.type() == QtCore.QEvent.Type.ActivationChange and self.isActiveWindow()
+                and hasattr(self, "mouse_panel") and not self.mouse_panel.is_running()):
+            self.mouse_panel.check_access()
+            self.update_steps()
 
     def shutdown(self) -> None:
         """Destroy the virtual device and store the settings. Safe to call twice."""

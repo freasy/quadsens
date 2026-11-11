@@ -13,10 +13,11 @@ from ..emulator import (
     EmulatorSession,
     LogEntry,
     format_entry,
+    summarize_entry,
 )
-from ..hints import uhid_hint
+from ..hints import UHID_OK, uhid_short
 from .qt import QtCore, QtGui, QtWidgets, Signal
-from .status import MessageLabel, StatusDot
+from .status import SPACE_M, SPACE_S, Disclosure, MessageLabel, StatusDot, heading
 
 LOG_LINES = 500
 # Lines that report a directional write start with this marker. The marker is
@@ -60,7 +61,7 @@ class WriteHighlighter(QtGui.QSyntaxHighlighter):
         self.setFormat(0, len(text), fmt)
 
 
-class MousePanel(QtWidgets.QGroupBox):
+class MousePanel(QtWidgets.QWidget):
     """Runs the emulator inside the GUI thread.
 
     The uhid descriptors are watched with QSocketNotifier, so each kernel event
@@ -68,13 +69,17 @@ class MousePanel(QtWidgets.QGroupBox):
     """
 
     writes_changed = Signal()
+    running_changed = Signal(bool)
 
     def __init__(self, session_factory: SessionFactory,
                  uhid_access: Callable[[], str] | None = None,
+                 settings: QtCore.QSettings | None = None,
                  parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__("Virtual mouse", parent)
+        super().__init__(parent)
+        self.setAccessibleName("Virtual mouse")
         self._factory = session_factory
         self._uhid_access = uhid_access
+        self._access = UHID_OK
         self._session: EmulatorSession | None = None
         self._notifiers: list[QtCore.QSocketNotifier] = []
         self._follow = True
@@ -128,8 +133,18 @@ class MousePanel(QtWidgets.QGroupBox):
         self.log_view.setTabChangesFocus(True)
         self._highlighter = WriteHighlighter(self.log_view)
         self.log_view.verticalScrollBar().valueChanged.connect(self._on_scrolled)
-        log_label = QtWidgets.QLabel("Command lo&g:")
-        log_label.setBuddy(self.log_view)
+
+        # The log is protocol detail: hidden until asked for, summarised meanwhile.
+        self.log_box = QtWidgets.QWidget()
+        self.summary_label = QtWidgets.QLabel("No events yet.")
+        self.summary_label.setAccessibleName("Last event of the virtual mouse")
+        self.summary_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
+                                         QtWidgets.QSizePolicy.Policy.Preferred)
+        self.log_toggle = Disclosure("Sho&w protocol log", self.log_box)
+        self.log_toggle.setToolTip(
+            "Show every command the virtual mouse received. Not needed for normal use; "
+            "the line next to this button names the last event that matters.")
+        self.log_toggle.setAccessibleDescription(self.log_toggle.toolTip())
 
         self.follow_label = QtWidgets.QLabel()
         self.follow_label.setAccessibleName("Log auto-scroll state")
@@ -144,31 +159,44 @@ class MousePanel(QtWidgets.QGroupBox):
         self.clear_button.clicked.connect(self.clear_log)
 
         controls = QtWidgets.QHBoxLayout()
+        controls.setSpacing(SPACE_M)
+        controls.addWidget(self.toggle_button)
+        controls.addWidget(self.dot)
+        controls.addWidget(self.status_label, 1)
         controls.addWidget(pid_label)
         controls.addWidget(self.pid_combo)
-        controls.addWidget(self.toggle_button)
-        controls.addSpacing(12)
-        controls.addWidget(self.dot)
-        controls.addWidget(self.status_label)
-        controls.addStretch(1)
+
+        summary = QtWidgets.QHBoxLayout()
+        summary.setSpacing(SPACE_M)
+        summary.addWidget(self.log_toggle)
+        summary.addWidget(self.summary_label, 1)
 
         log_bar = QtWidgets.QHBoxLayout()
-        log_bar.addWidget(log_label)
-        log_bar.addStretch(1)
-        log_bar.addWidget(self.follow_label)
-        log_bar.addSpacing(8)
+        log_bar.setSpacing(SPACE_M)
+        log_bar.addWidget(self.follow_label, 1)
         log_bar.addWidget(self.copy_button)
         log_bar.addWidget(self.clear_button)
+        log_layout = QtWidgets.QVBoxLayout(self.log_box)
+        log_layout.setContentsMargins(0, 0, 0, 0)
+        log_layout.setSpacing(SPACE_S)
+        log_layout.addWidget(self.log_view, 1)
+        log_layout.addLayout(log_bar)
 
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(SPACE_S + 2)
+        layout.addWidget(heading("Virtual mouse"))
         layout.addLayout(controls)
         layout.addWidget(self.message)
-        layout.addLayout(log_bar)
-        layout.addWidget(self.log_view, 1)
+        layout.addLayout(summary)
+        layout.addWidget(self.log_box, 1)
         self.message.hide()
-        self._update_status()
-        self._update_log_controls()
+        if settings is not None:
+            self.log_toggle.setChecked(bool(settings.value("ui/show_log", False, type=bool)))
+            self.log_toggle.toggled.connect(
+                lambda shown: settings.setValue("ui/show_log", shown))
         self.check_access()
+        self._update_log_controls()
 
     # ---- settings ---------------------------------------------------------
 
@@ -185,12 +213,19 @@ class MousePanel(QtWidgets.QGroupBox):
     def is_running(self) -> bool:
         return self._session is not None and self._session.running
 
-    def check_access(self) -> None:
-        """Say up front when the uhid node is missing or not writable."""
-        if self._uhid_access is None or self.is_running():
-            return
-        hint = uhid_hint(self._uhid_access())
-        self._show_message(hint, error=bool(hint))
+    def check_access(self) -> str:
+        """Look at the uhid node again; the status line names a problem up front."""
+        if self._uhid_access is not None:
+            self._access = self._uhid_access()
+        self._update_status()
+        return self._access
+
+    def access(self) -> str:
+        """Result of the last check_access(): "ok", "missing" or "denied"."""
+        return self._access
+
+    def log_shown(self) -> bool:
+        return bool(self.log_toggle.isChecked())
 
     def toggle(self) -> None:
         if self.is_running():
@@ -207,7 +242,7 @@ class MousePanel(QtWidgets.QGroupBox):
             session.start()
         except (EmulatorError, OSError) as exc:
             self._show_message(str(exc), error=True)
-            self._update_status()
+            self.check_access()
             return
         self._session = session
         for fd in session.fds:
@@ -215,6 +250,7 @@ class MousePanel(QtWidgets.QGroupBox):
             notifier.activated.connect(lambda *_args, fd=fd: self._pump(fd))
             self._notifiers.append(notifier)
         self._update_status()
+        self.running_changed.emit(True)
 
     def stop(self, reason: str = "") -> None:
         """Tear the device down. Safe to call when it is not running."""
@@ -228,6 +264,8 @@ class MousePanel(QtWidgets.QGroupBox):
         if reason:
             self._show_message(reason, error=True)
         self._update_status()
+        if session is not None:
+            self.running_changed.emit(False)
 
     def _pump(self, fd: int) -> None:
         session = self._session
@@ -247,6 +285,10 @@ class MousePanel(QtWidgets.QGroupBox):
         if "highlight" in entry:
             lines.append(WRITE_PREFIX + str(entry["highlight"]))
         self._append(lines)
+        summary = summarize_entry(entry)
+        if summary is not None:
+            self.summary_label.setText("Last event: " + summary)
+            self.summary_label.setToolTip(self.summary_label.text())
         if self.writes.feed(entry):
             self.writes_changed.emit()
 
@@ -323,9 +365,12 @@ class MousePanel(QtWidgets.QGroupBox):
         running = session is not None and session.running
         self.pid_combo.setEnabled(not running)
         self.toggle_button.setText("&Stop virtual mouse" if running else "&Start virtual mouse")
+        self.toggle_button.setEnabled(running or self._access == UHID_OK)
         if not running or session is None:
             self.dot.set_state(StatusDot.OFF)
-            self.status_label.setText("Stopped")
+            problem = uhid_short(self._access)
+            self.status_label.setText("Stopped: " + problem if problem else "Stopped")
+            self.status_label.setToolTip(self.status_label.text())
         elif session.open_count > 0:
             self.dot.set_state(StatusDot.ACTIVE)
             self.status_label.setText("Running: device opened by a client (%04X:%04X)"

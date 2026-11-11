@@ -11,9 +11,10 @@ from pathlib import Path
 from unittest import mock
 
 import quadsens
-from quadsens import about, calibration, emulator, hints, resources
+from quadsens import about, calibration, emulator, hints, resources, steps
 from quadsens.driver import DriverState, DriverStatus
 from quadsens.model import Scalars, format_decimal, parse_decimal
+from quadsens.persist import SaveState
 
 ROOT = Path(__file__).resolve().parent.parent
 BRANDS = re.compile(r"purevector|omnisense|corsair|sabre|aimlab", re.IGNORECASE)
@@ -88,7 +89,7 @@ class AboutTest(unittest.TestCase):
 
 
 class HintTest(unittest.TestCase):
-    def test_driver_status_names_the_next_step(self) -> None:
+    def test_driver_status_is_short_and_names_the_next_step(self) -> None:
         ok = hints.driver_status(DriverState(DriverStatus.OK, Scalars.unity()))
         self.assertIn("values read from the driver", ok)
         not_loaded = hints.driver_status(DriverState(DriverStatus.NOT_LOADED))
@@ -96,18 +97,49 @@ class HintTest(unittest.TestCase):
         self.assertIn("forked yeetmouse module", not_loaded)
         unsupported = hints.driver_status(DriverState(DriverStatus.UNSUPPORTED))
         self.assertIn("no DirScale parameters", unsupported)
-        self.assertIn("feature/directional-scalars", unsupported)
         unreadable = hints.driver_status(DriverState(DriverStatus.NOT_READABLE))
         self.assertIn("not readable", unreadable)
-        self.assertIn("group yeetmouse", unreadable)
+        self.assertIn("Join group yeetmouse", unreadable)
+        self.assertIn("log in again", unreadable)
+        error = hints.driver_status(DriverState(DriverStatus.ERROR, message="boom"))
+        self.assertIn("boom", error)
+        # Short enough for two lines in the narrow panel; the commands are in the help.
+        for text in (not_loaded, unsupported, unreadable):
+            self.assertLessEqual(len(text), 84, text)
+
+    def test_driver_help_has_the_commands(self) -> None:
+        self.assertEqual(hints.driver_help(DriverState(DriverStatus.OK, Scalars.unity())), "")
+        self.assertIn("sudo modprobe yeetmouse",
+                      hints.driver_help(DriverState(DriverStatus.NOT_LOADED)))
+        self.assertIn("feature/directional-scalars",
+                      hints.driver_help(DriverState(DriverStatus.UNSUPPORTED)))
+        unreadable = hints.driver_help(DriverState(DriverStatus.NOT_READABLE))
+        self.assertIn("sudo usermod -aG yeetmouse $USER", unreadable)
         self.assertIn("log in again", unreadable)
         self.assertIn("systemctl restart yeetmouse.service", unreadable)
         self.assertIn("asks for authorization", unreadable)
-        no_helper = hints.driver_status(DriverState(DriverStatus.NOT_READABLE),
-                                        helper_installed=False)
+        no_helper = hints.driver_help(DriverState(DriverStatus.NOT_READABLE),
+                                      helper_installed=False)
         self.assertIn("not installed system-wide", no_helper)
-        error = hints.driver_status(DriverState(DriverStatus.ERROR, message="boom"))
-        self.assertIn("boom", error)
+
+    def test_save_state_texts(self) -> None:
+        self.assertEqual(hints.save_state_text(SaveState.SAVED), "✓ Saved to config.")
+        self.assertEqual(hints.save_state_text(SaveState.DIFFERS),
+                         "Applied, not saved: lost on module reload.")
+        self.assertIn("no directional values", hints.save_state_text(SaveState.MISSING_KEYS))
+        self.assertIn("not found", hints.save_state_text(SaveState.DIFFERS, tool_found=False))
+        self.assertIn("/usr/bin", hints.tool_missing())
+        for state in SaveState:
+            self.assertTrue(hints.save_state_text(state))
+            self.assertLessEqual(len(hints.save_state_text(state)), 52)
+
+    def test_setup_problems_lists_only_what_is_wrong(self) -> None:
+        fine = DriverState(DriverStatus.OK, Scalars.unity())
+        self.assertEqual(hints.setup_problems(hints.UHID_OK, fine, True, True), [])
+        problems = hints.setup_problems(
+            hints.UHID_DENIED, DriverState(DriverStatus.NOT_LOADED), True, False)
+        self.assertEqual(len(problems), 3)
+        self.assertIn("99-quadsens.rules", problems[0])
 
     def test_uhid_hint(self) -> None:
         self.assertEqual(hints.uhid_hint(hints.UHID_OK), "")
@@ -119,11 +151,15 @@ class HintTest(unittest.TestCase):
 
     def test_texts_use_neutral_names(self) -> None:
         texts = [*hints.FIRST_STEPS, hints.NO_RESULT, hints.NO_RESULT_FOLDER, hints.PERSIST,
+                 hints.FLIP_Y, hints.tool_missing(), *steps.TITLES.values(),
+                 *steps.ACTIONS.values(), *steps.SHORT_TITLES.values(), steps.ALL_DONE,
                  hints.uhid_hint(hints.UHID_MISSING), hints.uhid_hint(hints.UHID_DENIED)]
         texts += [hints.driver_status(DriverState(status)) for status in DriverStatus]
         self.assertIsNone(BRANDS.search("\n".join(texts)))
         self.assertIn("yeetmousectl save", hints.PERSIST)
         self.assertIn("reloaded", hints.PERSIST)
+        self.assertIn("verified", hints.FLIP_Y)
+        self.assertEqual(len(hints.FIRST_STEPS), 6)
 
     def test_uhid_access(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

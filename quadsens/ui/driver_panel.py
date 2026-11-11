@@ -1,10 +1,10 @@
-""""Driver (yeetmouse)" area: show, edit and apply the four DirScale values."""
+""""Driver (yeetmouse)" area: show, edit, apply and save the four DirScale values."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 
-from ..calibration import Calibration, driver_scalars
+from ..calibration import Result, driver_scalars
 from ..driver import (
     PARAM_NAMES,
     Driver,
@@ -13,11 +13,20 @@ from ..driver import (
     DriverStatus,
     describe_helper_failure,
 )
-from ..hints import PERSIST, driver_status
-from ..model import SCALE_MAX, SCALE_MIN, Scalars
-from .qt import QtCore, QtWidgets
+from ..hints import FLIP_Y, PERSIST, driver_status, save_state_text, tool_missing
+from ..model import SCALE_MAX, SCALE_MIN, Scalars, format_deviation
+from ..persist import PersistError, SaveCommand, Saver, SaveState, describe_save_failure
+from .qt import QtCore, QtWidgets, Signal
 from .scale_spin import ScaleSpinBox
-from .status import MessageLabel, WrapLabel
+from .status import (
+    SPACE_M,
+    SPACE_S,
+    Disclosure,
+    MessageLabel,
+    WrapLabel,
+    column_header,
+    heading,
+)
 
 # Mouse direction each parameter scales; the driver's +Y is "down".
 DIRECTIONS: tuple[str, ...] = ("right", "left", "down", "up")
@@ -29,28 +38,38 @@ SAME_VALUE = 0.5 * 10 ** -DECIMALS + 1e-9
 CHANGED_MARK = "≠"
 
 
-class DriverPanel(QtWidgets.QGroupBox):
+class DriverPanel(QtWidgets.QWidget):
+    # Something the step display depends on changed: values, driver or save state.
+    changed = Signal()
+    # A set of values reached the driver.
+    applied = Signal(object)  # Scalars
+    flip_changed = Signal(bool)
+
     def __init__(self, driver: Driver, settings: QtCore.QSettings,
-                 get_calibration: Callable[[], Calibration | None],
+                 get_result: Callable[[], Result | None],
+                 saver: Saver | None = None,
                  parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__("Driver (yeetmouse)", parent)
+        super().__init__(parent)
+        self.setAccessibleName("Driver (yeetmouse)")
         self._driver = driver
         self._settings = settings
-        self._get_calibration = get_calibration
+        self._get_result = get_result
+        self._saver = saver if saver is not None else Saver()
         self._process: QtCore.QProcess | None = None
         self._pending: Scalars | None = None
+        self._save_command: SaveCommand | None = None
+        # What was last written when the driver cannot be read back.
+        self._assumed: Scalars | None = None
         self.state: DriverState = DriverState(DriverStatus.NOT_LOADED)
+        self.save_state: SaveState = SaveState.UNKNOWN
 
         grid = QtWidgets.QGridLayout()
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(4)
-        for column, title in enumerate(("Direction", "Driver reports", "New value")):
-            header = QtWidgets.QLabel(title)
-            font = header.font()
-            font.setBold(True)
-            header.setFont(font)
-            grid.addWidget(header, 0, column)
+        grid.setHorizontalSpacing(SPACE_M)
+        grid.setVerticalSpacing(SPACE_S)
+        for column, title in enumerate(("Direction", "Driver reports", "", "New value")):
+            grid.addWidget(column_header(title), 0, column)
         self.current_labels: list[QtWidgets.QLabel] = []
+        self.deviation_labels: list[QtWidgets.QLabel] = []
         self.spins: list[ScaleSpinBox] = []
         self.change_marks: list[QtWidgets.QLabel] = []
         for row, (title, name, direction) in enumerate(
@@ -68,7 +87,7 @@ class DriverPanel(QtWidgets.QGroupBox):
                 purpose + ". 1 leaves the movement unchanged. Dot or comma as "
                 "decimal separator.")
             spin.setToolTip(purpose + " (1 = unchanged)")
-            spin.valueChanged.connect(self._update_pending)
+            spin.valueChanged.connect(self._values_edited)
             label = QtWidgets.QLabel(title)
             label.setBuddy(spin)
             label.setToolTip(purpose)
@@ -77,79 +96,120 @@ class DriverPanel(QtWidgets.QGroupBox):
             current.setToolTip(f"Value of {name} the loaded module reports")
             current.setTextInteractionFlags(
                 QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+            deviation = QtWidgets.QLabel()
+            deviation.setAccessibleName(f"Deviation from 1.0 for {name} ({direction})")
+            deviation.setToolTip("Deviation of the driver value from 1.0 in percent")
+            deviation.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight
+                                   | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            deviation.setMinimumWidth(deviation.fontMetrics().horizontalAdvance("+00.0 %"))
             mark = QtWidgets.QLabel()
             mark.setAccessibleName(f"Change marker for {name} ({direction})")
             mark.setFixedWidth(mark.fontMetrics().horizontalAdvance(CHANGED_MARK) + 2)
             grid.addWidget(label, row, 0)
             grid.addWidget(current, row, 1)
-            grid.addWidget(spin, row, 2)
-            grid.addWidget(mark, row, 3)
+            grid.addWidget(deviation, row, 2)
+            grid.addWidget(spin, row, 3)
+            grid.addWidget(mark, row, 4)
             self.current_labels.append(current)
+            self.deviation_labels.append(deviation)
             self.spins.append(spin)
             self.change_marks.append(mark)
-        grid.setColumnStretch(2, 1)
+        grid.setColumnStretch(3, 1)
 
+        # Two lines of state. A driver problem takes the place of both, so that
+        # a hint never changes the height of the panel.
+        self.status_label = WrapLabel("Driver status")
         self.pending_label = QtWidgets.QLabel()
         self.pending_label.setAccessibleName("Unsaved changes")
         self.pending_label.setToolTip(
-            "Whether the new values differ from what the driver reports. " + PERSIST)
+            "Whether the new values differ from what the driver reports.")
+        self.saved_label = QtWidgets.QLabel()
+        self.saved_label.setAccessibleName("Saved to config state")
+        self.saved_label.setToolTip(PERSIST)
+        state_box = QtWidgets.QWidget()
+        state_layout = QtWidgets.QVBoxLayout(state_box)
+        state_layout.setContentsMargins(0, 0, 0, 0)
+        state_layout.setSpacing(2)
+        state_layout.addWidget(self.status_label)
+        state_layout.addWidget(self.pending_label)
+        state_layout.addWidget(self.saved_label)
+        state_layout.addStretch(1)
+        state_box.setMinimumHeight(2 * self.pending_label.fontMetrics().height() + 4)
 
-        self.use_button = QtWidgets.QPushButton("Use cali&bration")
-        self.use_button.setToolTip("Fill the new values from the calibration file")
+        self.use_button = QtWidgets.QPushButton("Use resul&t")
+        self.use_button.setToolTip("Fill the new values from the calibration result")
         self.use_button.clicked.connect(self.use_calibration)
-        self.flip_check = QtWidgets.QCheckBox("Flip &Y")
-        self.flip_check.setToolTip(
-            "Exchange the down and up values. Use it if up and down feel swapped "
-            "after applying a calibration.")
-        self.flip_check.setChecked(bool(settings.value("driver/flip_y", False, type=bool)))
-        self.flip_check.toggled.connect(self._flip_toggled)
         self.reset_button = QtWidgets.QPushButton("Reset to 1.&0")
         self.reset_button.setToolTip(
             "Set all four new values to 1.0 (no scaling). Apply this before a new "
             "calibration, so that it measures the unscaled mouse.")
         self.reset_button.clicked.connect(self.reset_values)
         self.read_button = QtWidgets.QPushButton("Read agai&n")
-        self.read_button.setToolTip("Read the current values from the driver again")
+        self.read_button.setToolTip(
+            "Read the current values from the driver and the config file again")
         self.read_button.clicked.connect(lambda: self.refresh())
         self.apply_button = QtWidgets.QPushButton("&Apply")
         self.apply_button.setToolTip("Write the new values to the driver. " + PERSIST)
         self.apply_button.clicked.connect(self.apply)
+        self.save_button = QtWidgets.QPushButton("Save to confi&g")
+        self.save_button.clicked.connect(self.save_config)
 
         buttons = QtWidgets.QGridLayout()
+        buttons.setHorizontalSpacing(SPACE_M)
+        buttons.setVerticalSpacing(SPACE_S)
         buttons.addWidget(self.use_button, 0, 0)
         buttons.addWidget(self.reset_button, 0, 1)
-        buttons.addWidget(self.read_button, 1, 0)
-        buttons.addWidget(self.apply_button, 1, 1)
+        buttons.addWidget(self.read_button, 0, 2)
+        buttons.addWidget(self.apply_button, 1, 0)
+        buttons.addWidget(self.save_button, 1, 1, 1, 2)
 
-        self.auto_check = QtWidgets.QCheckBox("Apply sa&ved on start")
-        self.auto_check.setAccessibleName("Apply saved values on start")
-        self.auto_check.setToolTip("Write the last applied values to the driver when "
-                                   "the application starts")
+        # Rarely needed switches, out of the way.
+        self.flip_check = QtWidgets.QCheckBox("Flip &Y")
+        self.flip_check.setToolTip("Exchange the down and up values. " + FLIP_Y)
+        self.flip_check.setChecked(bool(settings.value("driver/flip_y", False, type=bool)))
+        self.flip_check.toggled.connect(self._flip_toggled)
+        self.flip_hint = WrapLabel("About Flip Y")
+        self.flip_hint.setText(FLIP_Y)
+        self.auto_check = QtWidgets.QCheckBox("Apply saved values on start")
+        self.auto_check.setToolTip(
+            "Write the values of the last Apply to the driver whenever QuadSens starts. "
+            "Not needed once they are saved to the config.")
         self.auto_check.setChecked(
             bool(settings.value("driver/apply_on_start", False, type=bool)))
         self.auto_check.toggled.connect(
             lambda checked: settings.setValue("driver/apply_on_start", checked))
-
-        checks = QtWidgets.QHBoxLayout()
-        checks.addWidget(self.flip_check)
-        checks.addSpacing(8)
-        checks.addWidget(self.auto_check)
-        checks.addStretch(1)
+        self.advanced = QtWidgets.QWidget()
+        advanced_layout = QtWidgets.QVBoxLayout(self.advanced)
+        advanced_layout.setContentsMargins(SPACE_M * 2, 0, 0, 0)
+        advanced_layout.setSpacing(SPACE_S)
+        advanced_layout.addWidget(self.flip_check)
+        advanced_layout.addWidget(self.flip_hint)
+        advanced_layout.addWidget(self.auto_check)
+        self.advanced_toggle = Disclosure("Ad&vanced", self.advanced)
+        self.advanced_toggle.setToolTip("Show the switches that are rarely needed: Flip Y "
+                                        "and applying the saved values on start")
+        # A switch that is on must not hide: it changes what Use result does.
+        self.advanced_toggle.setChecked(self.flip_check.isChecked())
 
         for control in (self.use_button, self.flip_check, self.reset_button,
-                        self.read_button, self.apply_button, self.auto_check):
+                        self.read_button, self.apply_button, self.auto_check,
+                        self.advanced_toggle):
             control.setAccessibleDescription(control.toolTip())
 
-        self.status_label = WrapLabel("Driver status")
         self.message = MessageLabel("Driver message")
 
         layout = QtWidgets.QVBoxLayout(self)
-        layout.addWidget(self.status_label)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(SPACE_S + 2)
+        head = QtWidgets.QHBoxLayout()
+        head.addWidget(heading("Driver (yeetmouse)"), 1)
+        head.addWidget(self.advanced_toggle)
+        layout.addLayout(head)
         layout.addLayout(grid)
-        layout.addWidget(self.pending_label)
+        layout.addWidget(state_box)
         layout.addLayout(buttons)
-        layout.addLayout(checks)
         layout.addWidget(self.message)
+        layout.addWidget(self.advanced)
         layout.addStretch(1)
 
         self.refresh()
@@ -167,6 +227,7 @@ class DriverPanel(QtWidgets.QGroupBox):
             spin.setValue(value)
 
     def saved_scalars(self) -> Scalars | None:
+        """The values of the last successful Apply, kept in the settings."""
         raw = self._settings.value("driver/saved_values")
         if not isinstance(raw, (list, tuple)) or len(raw) != 4:
             return None
@@ -179,6 +240,18 @@ class DriverPanel(QtWidgets.QGroupBox):
 
     def flip_y(self) -> bool:
         return bool(self.flip_check.isChecked())
+
+    def driver_values(self) -> Scalars | None:
+        """What the driver uses: as reported, else as last written in this session."""
+        return self.state.scalars if self.state.scalars is not None else self._assumed
+
+    def result_values(self) -> Scalars | None:
+        """The calibration result as it goes into the new values, None without one."""
+        result = self._get_result()
+        if result is None:
+            return None
+        mapped = driver_scalars(result.scalars, self.flip_y())
+        return Scalars(*(round(value, DECIMALS) for value in mapped.as_tuple()))
 
     def changed_directions(self) -> list[str]:
         """Directions whose new value differs from what the driver reports.
@@ -195,23 +268,48 @@ class DriverPanel(QtWidgets.QGroupBox):
     def has_unsaved_changes(self) -> bool:
         return bool(self.changed_directions())
 
+    def tool_found(self) -> bool:
+        return self._saver.find_tool() is not None
+
+    def is_busy(self) -> bool:
+        """True while pkexec or the save tool is running."""
+        return self._process is not None
+
+    def write_problem(self) -> str:
+        """Why nothing can be written to the driver right now, or ""."""
+        status = self.state.status
+        if status is DriverStatus.NOT_LOADED:
+            return "The yeetmouse module is not loaded (Help > Setup help)."
+        if status is DriverStatus.UNSUPPORTED:
+            return "The loaded yeetmouse module is not the fork (Help > Setup help)."
+        if status is DriverStatus.NOT_READABLE and not self._driver.helper_installed():
+            return "The driver is not writable for you (Help > Setup help)."
+        return ""
+
     # ---- actions ----------------------------------------------------------
 
     def refresh(self) -> DriverState:
-        """Read the driver and show what it reports."""
+        """Read the driver and the config file and show what they hold."""
         self.state = state = self._driver.read()
+        if state.scalars is not None or state.status is not DriverStatus.NOT_READABLE:
+            self._assumed = None
         values = state.scalars.as_tuple() if state.scalars is not None else None
         for index, label in enumerate(self.current_labels):
             label.setText(NO_VALUE if values is None else f"{values[index]:.6f}")
+            self.deviation_labels[index].setText(
+                "" if values is None else format_deviation(values[index]))
         self.status_label.setText(driver_status(state, self._driver.helper_installed()))
-        # While everything works, the line below the values says so; the status
-        # line appears when there is something to do about the driver.
-        self.status_label.setVisible(state.status is not DriverStatus.OK)
+        self.save_state = self._saver.state(self.driver_values())
         self._update_pending()
+        self.changed.emit()
         return state
 
-    def _update_pending(self, *_args: object) -> None:
-        """Mark edited rows and enable Apply only when there is something to write."""
+    def _values_edited(self, *_args: object) -> None:
+        self._update_pending()
+        self.changed.emit()
+
+    def _update_pending(self) -> None:
+        """Mark edited rows, show the state lines and enable what can be done."""
         changed = self.changed_directions()
         for direction, spin, mark in zip(DIRECTIONS, self.spins, self.change_marks):
             edited = direction in changed
@@ -225,36 +323,61 @@ class DriverPanel(QtWidgets.QGroupBox):
         font.setBold(bool(changed))
         self.pending_label.setFont(font)
         if self.state.scalars is None:
-            self.pending_label.setText(
-                "Driver values unknown; Apply writes these.")
+            self.pending_label.setText("Driver values unknown; Apply writes these.")
         elif changed:
             self.pending_label.setText(
                 "%s Unsaved changes: %s" % (CHANGED_MARK, ", ".join(changed)))
         else:
             self.pending_label.setText("Driver values read. No unsaved changes.")
-        self.apply_button.setEnabled(
-            self._process is None and (self.state.scalars is None or bool(changed)))
+        tool_found = self.tool_found()
+        self.saved_label.setText(save_state_text(self.save_state, tool_found))
+
+        # While everything works the two state lines are shown; a driver problem
+        # replaces them with what to do about it.
+        ok = self.state.status is DriverStatus.OK
+        self.status_label.setVisible(not ok)
+        self.pending_label.setVisible(ok)
+        self.saved_label.setVisible(ok)
+
+        idle = self._process is None
+        self.apply_button.setEnabled(idle and (self.state.scalars is None or bool(changed)))
+        can_save = idle and tool_found and self.state.status not in (
+            DriverStatus.NOT_LOADED, DriverStatus.UNSUPPORTED)
+        self.save_button.setEnabled(can_save)
+        if not tool_found:
+            hint = "Not available: " + tool_missing()
+        else:
+            hint = ("Write the values the driver reports to %s, so that they survive a "
+                    "module reload. Asks for authorization unless the file is writable "
+                    "for you." % self._saver.config_path)
+        self.save_button.setToolTip(hint)
+        self.save_button.setAccessibleDescription(hint)
 
     def use_calibration(self) -> None:
-        calibration = self._get_calibration()
-        if calibration is None:
-            self.message.show_message("No usable calibration file to take values from.",
+        result = self._get_result()
+        if result is None:
+            self.message.show_message("No usable calibration result to take values from.",
                                       error=True)
             return
-        scalars = driver_scalars(calibration.firmware, self.flip_y())
-        try:
-            scalars.validate()
-        except ValueError as exc:
-            self.message.show_message(f"Calibration not used: {exc}", error=True)
-            return
+        scalars = driver_scalars(result.scalars, self.flip_y())
         self.set_values(scalars)
         self.message.show_message(
-            "Filled from the calibration file%s. Press Apply to write them."
-            % (" with Y flipped" if self.flip_y() else ""))
+            "Filled from %s%s. Press Apply to write them."
+            % (result.source, " with Y flipped" if self.flip_y() else ""))
 
     def reset_values(self) -> None:
         self.set_values(Scalars.unity())
         self.message.show_message("New values reset to 1.0. Press Apply to write them.")
+
+    def reset_and_apply(self) -> None:
+        """One step: set all four values to 1.0 and write them to the driver."""
+        self.set_values(Scalars.unity())
+        if self.state.scalars is not None and not self.has_unsaved_changes():
+            self.message.show_message("The driver values are 1.0 already.")
+            self.applied.emit(Scalars.unity())
+            self.changed.emit()
+            return
+        self.apply()
 
     def _flip_toggled(self, checked: bool) -> None:
         self._settings.setValue("driver/flip_y", checked)
@@ -262,6 +385,8 @@ class DriverPanel(QtWidgets.QGroupBox):
         self.message.show_message(
             "Flip Y %s: the down and up values were exchanged. Press Apply to write them."
             % ("on" if checked else "off"))
+        self.flip_changed.emit(checked)
+        self.changed.emit()
 
     def apply(self) -> None:
         """Write the new values: directly if permitted, otherwise through pkexec."""
@@ -293,20 +418,9 @@ class DriverPanel(QtWidgets.QGroupBox):
         except DriverError as exc:
             self.message.show_message(str(exc), error=True)
             return
-        process = QtCore.QProcess(self)
-        process.finished.connect(self._helper_finished)
-        process.errorOccurred.connect(self._helper_error)
-        self._process = process
         self._pending = scalars
-        self.apply_button.setEnabled(False)
         self.message.show_message("Waiting for authorization (pkexec) ...")
-        process.start(command[0], command[1:])
-
-    def _helper_error(self, error: QtCore.QProcess.ProcessError) -> None:
-        if error != QtCore.QProcess.ProcessError.FailedToStart:
-            return  # a crash is reported through finished()
-        self._finish_process()
-        self.message.show_message("pkexec could not be started.", error=True)
+        self._start(command, self._helper_finished, "pkexec could not be started.")
 
     def _helper_finished(self, exit_code: int, _status: QtCore.QProcess.ExitStatus) -> None:
         process, scalars = self._process, self._pending
@@ -319,16 +433,10 @@ class DriverPanel(QtWidgets.QGroupBox):
             return
         self._applied(scalars, "through pkexec")
 
-    def _finish_process(self) -> None:
-        if self._process is not None:
-            self._process.deleteLater()
-        self._process = None
-        self._pending = None
-        self._update_pending()
-
     def _applied(self, scalars: Scalars, how: str) -> None:
         self._settings.setValue("driver/saved_values",
                                 [f"{value:.6f}" for value in scalars.as_tuple()])
+        self._assumed = scalars
         state = self.refresh()
         if state.scalars is None:
             self.message.show_message(
@@ -341,3 +449,73 @@ class DriverPanel(QtWidgets.QGroupBox):
             self.message.show_message(
                 f"Written {how}, but the driver reports different values (see "
                 "\"Driver reports\").", error=True)
+            return
+        self.applied.emit(scalars)
+
+    # ---- save to config ---------------------------------------------------
+
+    def save_config(self) -> None:
+        """Persist the values the driver reports with the fork's yeetmousectl."""
+        if self._process is not None:
+            return
+        try:
+            command = self._saver.command()
+        except PersistError as exc:
+            self.message.show_message(f"Not saved: {exc}.", error=True)
+            return
+        self._save_command = command
+        self.message.show_message(
+            "Waiting for authorization (pkexec) ..." if command.elevated
+            else "Saving to %s ..." % self._saver.config_path)
+        self._start(command.argv, self._save_finished,
+                    "Not saved: %s could not be started." % command.argv[0])
+
+    def _save_finished(self, exit_code: int, _status: QtCore.QProcess.ExitStatus) -> None:
+        process, command = self._process, self._save_command
+        if process is None or command is None:
+            return
+        output = bytes(process.readAllStandardError().data()).decode("utf-8", "replace")
+        output += bytes(process.readAllStandardOutput().data()).decode("utf-8", "replace")
+        self._finish_process()
+        if exit_code != 0:
+            self.message.show_message(
+                describe_save_failure(exit_code, output, command.elevated), error=True)
+            self.refresh()
+            return
+        self.refresh()
+        state, text = self._saver.verify(self.driver_values())
+        self.save_state = state
+        self._update_pending()
+        saved = state is SaveState.SAVED
+        self.message.show_message(("✓ " + text) if saved else text,
+                                  error=state not in (SaveState.SAVED, SaveState.UNKNOWN))
+        self.changed.emit()
+
+    # ---- child processes --------------------------------------------------
+
+    def _start(self, command: list[str],
+               finished: Callable[[int, QtCore.QProcess.ExitStatus], None],
+               start_error: str) -> None:
+        process = QtCore.QProcess(self)
+        process.finished.connect(finished)
+
+        def failed(error: QtCore.QProcess.ProcessError) -> None:
+            if error != QtCore.QProcess.ProcessError.FailedToStart:
+                return  # a crash is reported through finished()
+            self._finish_process()
+            self.message.show_message(start_error, error=True)
+
+        process.errorOccurred.connect(failed)
+        self._process = process
+        self._update_pending()
+        self.changed.emit()
+        process.start(command[0], command[1:])
+
+    def _finish_process(self) -> None:
+        if self._process is not None:
+            self._process.deleteLater()
+        self._process = None
+        self._pending = None
+        self._save_command = None
+        self._update_pending()
+        self.changed.emit()

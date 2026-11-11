@@ -14,6 +14,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -26,6 +27,8 @@ import quadsens
 from quadsens import about, emulator, hints
 from quadsens.driver import PARAM_NAMES, Driver
 from quadsens.model import Scalars
+from quadsens.persist import Saver, SaveState
+from quadsens.steps import Step
 from quadsens.ui.driver_panel import CHANGED_MARK
 from quadsens.ui.main_window import MainWindow, about_html
 from quadsens.ui.mouse_panel import WRITE_PREFIX, write_line_colors
@@ -33,6 +36,7 @@ from quadsens.ui.scale_spin import ScaleSpinBox
 from quadsens.ui.status import StatusDot
 
 FIXTURE = Path(__file__).parent / "fixtures" / "ASFSettings.json"
+FAKE_TOOL = Path(__file__).parent / "fake_yeetmousectl.py"
 BRANDS = re.compile(r"purevector|omnisense|corsair|sabre|aimlab", re.IGNORECASE)
 _app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(["test"])
 
@@ -48,6 +52,25 @@ def _luminance(color: QtGui.QColor) -> float:
 def _contrast(a: QtGui.QColor, b: QtGui.QColor) -> float:
     high, low = sorted((_luminance(a), _luminance(b)), reverse=True)
     return (high + 0.05) / (low + 0.05)
+
+
+class FakeSession:
+    """Stands in for the uhid session, so that "running" can be tested without uhid."""
+
+    def __init__(self, product_id: int) -> None:
+        self.product_id = product_id
+        self.running = False
+        self.fds: list[int] = []
+        self.open_count = 0
+
+    def start(self) -> None:
+        self.running = True
+
+    def stop(self) -> None:
+        self.running = False
+
+    def pump(self, _fd: int) -> None:
+        pass
 
 
 def _mnemonic(text: str) -> str:
@@ -71,6 +94,13 @@ class MainWindowTest(unittest.TestCase):
         self.pattern = str(self.tmp / "Users" / "*" / "ASFData" / "*" / "ASFSettings.json")
         self.uhid = self.tmp / "uhid"  # stands in for /dev/uhid; never opened
         self.uhid.write_bytes(b"")
+        self.config = self.tmp / "yeetmouse.conf"  # stands in for /etc/yeetmouse.conf
+        self.config.write_text("sens=1\n", encoding="ascii")
+        self.saver = Saver(self.config, tool=FAKE_TOOL)
+        patcher = mock.patch.dict(os.environ, {"QUADSENS_FAKE_PARAMS": str(self.params),
+                                               "QUADSENS_FAKE_MODE": "fork"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.windows: list[MainWindow] = []
 
     def tearDown(self) -> None:
@@ -84,7 +114,8 @@ class MainWindowTest(unittest.TestCase):
         settings = QtCore.QSettings(str(self.tmp / "settings.ini"),
                                     QtCore.QSettings.Format.IniFormat)
         window = MainWindow(settings, self.pattern, Driver(self.params),
-                            str(self.tmp / "state.json"), uhid_path=str(self.uhid))
+                            str(self.tmp / "state.json"), uhid_path=str(self.uhid),
+                            saver=self.saver)
         self.windows.append(window)
         return window
 
@@ -267,7 +298,7 @@ class MainWindowTest(unittest.TestCase):
         box = window.info_box
         assert box is not None
         self.assertIn("Start the virtual mouse", box.text())
-        self.assertIn("yeetmousectl save", box.text())
+        self.assertIn("Save to config", box.text())
         box.close()
 
     def test_open_result_folder(self) -> None:
@@ -362,7 +393,8 @@ class MainWindowTest(unittest.TestCase):
         window = self.make_window()
         cal = window.calibration_panel
         self.assertEqual(cal.message.text(), hints.NO_RESULT)
-        self.assertIn("run the per-direction calibration", cal.message.text())
+        self.assertIn("Run the per-direction calibration", cal.message.text())
+        self.assertIsNone(cal.diagram.scalars())
         self.assertFalse(cal.message.is_error)
         self.assertIn("Nothing received yet", window.mouse_panel.log_view.placeholderText())
 
@@ -375,13 +407,22 @@ class MainWindowTest(unittest.TestCase):
         drv.read_button.click()
         self.assertFalse(drv.status_label.isHidden())
         self.assertIn("no DirScale parameters", drv.status_label.text())
-        self.assertIn("feature/directional-scalars", drv.status_label.text())
-        self.assertIn("unknown", drv.pending_label.text())
+        self.assertIn("Help > Setup help", drv.status_label.text())
+        self.assertTrue(drv.pending_label.isHidden())  # the problem takes its place
+        self.assertTrue(drv.saved_label.isHidden())
         self.assertTrue(drv.apply_button.isEnabled())
+        self.assertFalse(drv.save_button.isEnabled())
+        self.assertTrue(any("feature/directional-scalars" in text
+                            for text in window.setup_problems()))
 
         shutil.rmtree(self.params.parent)
         drv.read_button.click()
         self.assertIn("Load the forked yeetmouse module", drv.status_label.text())
+        window.setup_action.trigger()
+        box = window.info_box
+        assert box is not None
+        self.assertIn("sudo modprobe yeetmouse", box.text())
+        box.close()
 
     @unittest.skipIf(os.geteuid() == 0, "root can read everything")
     def test_unreadable_driver_points_to_the_group(self) -> None:
@@ -393,24 +434,39 @@ class MainWindowTest(unittest.TestCase):
         self.assertIn("Join group yeetmouse", text)
         self.assertIn("log in again", text)
         self.assertFalse(window.driver_panel.status_label.isHidden())
+        long_form = " ".join(window.setup_problems())
+        self.assertIn("sudo usermod -aG yeetmouse $USER", long_form)
+        self.assertIn("systemctl restart yeetmouse.service", long_form)
 
     def test_uhid_problems_are_shown_up_front(self) -> None:
         window = self.make_window()
-        self.assertTrue(window.mouse_panel.message.isHidden())
-        self.assertEqual(window.mouse_panel.message.text(), "")
+        self.assertEqual(window.mouse_panel.status_label.text(), "Stopped")
+        self.assertTrue(window.mouse_panel.toggle_button.isEnabled())
+        self.assertEqual(window.setup_problems(), [])
 
         self.uhid.unlink()
         missing = self.make_window()
-        self.assertFalse(missing.mouse_panel.message.isHidden())
-        self.assertIn("modprobe uhid", missing.mouse_panel.message.text())
+        mouse = missing.mouse_panel
+        self.assertEqual(mouse.status_label.text(),
+                         "Stopped: /dev/uhid is missing (Help > Setup help)")
+        self.assertFalse(mouse.toggle_button.isEnabled())  # cannot work
+        self.assertTrue(mouse.message.isHidden())           # no extra line in the layout
+        self.assertIn("modprobe uhid", " ".join(missing.setup_problems()))
+        self.assertFalse(missing.steps_bar.next_button.isEnabled())
+        self.assertIn("/dev/uhid is missing", missing.steps_bar.next_label.text())
 
         if os.geteuid() != 0:
             self.uhid.write_bytes(b"")
             self.uhid.chmod(0)
             denied = self.make_window()
-            self.assertIn("99-quadsens.rules", denied.mouse_panel.message.text())
-            self.assertIn("group input", denied.mouse_panel.message.text())
-            self.assertTrue(denied.mouse_panel.message.is_error)
+            self.assertIn("not writable", denied.mouse_panel.status_label.text())
+            problems = " ".join(denied.setup_problems())
+            self.assertIn("99-quadsens.rules", problems)
+            self.assertIn("group input", problems)
+            self.uhid.chmod(0o644)  # fixed while the window was open
+            denied.mouse_panel.check_access()
+            self.assertEqual(denied.mouse_panel.status_label.text(), "Stopped")
+            self.assertTrue(denied.mouse_panel.toggle_button.isEnabled())
 
     # ---- log ----------------------------------------------------------------
 
@@ -478,6 +534,7 @@ class MainWindowTest(unittest.TestCase):
     def test_auto_scroll_pauses_when_scrolled_up(self) -> None:
         window = self.make_window()
         window.resize(900, 660)
+        window.mouse_panel.log_toggle.setChecked(True)
         window.show()
         _app.processEvents()
         mouse = window.mouse_panel
@@ -555,7 +612,7 @@ class MainWindowTest(unittest.TestCase):
                                          ("right", "left", "down", "up")):
             self.assertEqual(spin.accessibleName(), f"New value for {name} ({direction})")
             self.assertIn(name, spin.toolTip())
-        self.assertIn("yeetmousectl save", drv.apply_button.toolTip())
+        self.assertIn("Save to config", drv.apply_button.toolTip())
         self.assertIn("until the yeetmouse module is reloaded", drv.apply_button.toolTip())
 
     def test_values_round_trip_in_a_comma_locale(self) -> None:
@@ -611,6 +668,300 @@ class MainWindowTest(unittest.TestCase):
         self.assertEqual(again.driver_panel.saved_scalars(),
                          Scalars(1.0375, 0.9625, 1.125, 0.875))
         self.assertEqual(again.driver_panel.spins[0].text(), "1.0375")
+
+    # ---- guided steps -------------------------------------------------------
+
+    def statuses(self, window: MainWindow) -> str:
+        return "".join(chip.text()[0] for chip in window.steps_bar.chips)
+
+    def wait_idle(self, window: MainWindow) -> None:
+        deadline = time.monotonic() + 10
+        while window.driver_panel.is_busy() and time.monotonic() < deadline:
+            _app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 50)
+        self.assertFalse(window.driver_panel.is_busy())
+
+    def new_result(self, window: MainWindow) -> None:
+        """The game writes a result now."""
+        stamp = time.time() + 0.01
+        os.utime(self.cal_file, (stamp, stamp))
+        window.calibration_panel.refresh()
+
+    def test_steps_walk_through(self) -> None:
+        for name in PARAM_NAMES:  # an older calibration is still applied
+            (self.params / name).write_text("0.990000\n")
+        window = self.make_window()
+        window.mouse_panel._factory = lambda pid, on_log: FakeSession(pid)
+        bar = window.steps_bar
+        self.assertEqual(self.statuses(window), "▶○○○○○")
+        self.assertEqual(bar.chips[0].text(), "▶ 1 Start mouse")
+        self.assertTrue(bar.chips[0].font().bold())
+        self.assertFalse(bar.chips[1].font().bold())
+        self.assertIn("Step 1 of 6", bar.next_label.text())
+        self.assertEqual(bar.next_button.text(), "Start virtual mouse")
+        self.assertTrue(bar.next_button.isDefault())
+        self.assertIn("pending", bar.chips[5].accessibleName())
+
+        bar.next_button.click()
+        self.assertTrue(window.mouse_panel.is_running())
+        self.assertEqual(self.statuses(window), "✓▶○○○○")
+        self.assertEqual(bar.next_button.text(), "Reset to 1.0 and apply")
+
+        bar.next_button.click()  # one click: reset and apply
+        self.assertEqual([(self.params / name).read_text() for name in PARAM_NAMES],
+                         ["1.000000\n"] * 4)
+        self.assertEqual(self.statuses(window), "✓✓▶○○○")
+        self.assertEqual(bar.next_button.text(), "Waiting for the result")
+        self.assertFalse(bar.next_button.isEnabled())  # this step happens in the game
+        self.assertIn("calibration in the game", bar.next_label.text())
+
+        self.new_result(window)
+        self.assertEqual(self.statuses(window), "✓✓✓▶○○")
+        self.assertEqual(bar.next_button.text(), "Use result")
+        bar.next_button.click()
+        self.assertEqual(window.driver_panel.values(), Scalars(1.0375, 0.9625, 1.125, 0.875))
+        self.assertEqual(self.statuses(window), "✓✓✓✓▶○")
+        self.assertEqual(bar.next_button.text(), "Apply")
+        bar.next_button.click()
+        self.assertEqual((self.params / "DirScaleYNeg").read_text(), "0.875000\n")
+        self.assertEqual(self.statuses(window), "✓✓✓✓✓▶")
+        self.assertEqual(bar.next_button.text(), "Save to config")
+        self.assertIn("lost on module reload", bar.next_label.text())
+        bar.next_button.click()
+        self.wait_idle(window)
+        self.assertEqual(self.statuses(window), "✓✓✓✓✓✓")
+        self.assertIn("All six steps are done", bar.next_label.text())
+        self.assertFalse(bar.next_button.isEnabled())
+        self.assertIn("dirScaleYNeg=0.875", self.config.read_text())
+
+        # Calibrating again: after the reset the old result is not "new" any more.
+        time.sleep(0.05)
+        window.driver_panel.reset_and_apply()
+        self.assertEqual(self.statuses(window), "✓✓▶○○○")
+
+    def test_steps_notice_values_sent_to_the_virtual_mouse(self) -> None:
+        self.cal_file.unlink()  # no result file at all
+        window = self.make_window()
+        window.mouse_panel._factory = lambda pid, on_log: FakeSession(pid)
+        window.run_step(Step.START)
+        self.assertEqual(self.statuses(window), "✓✓▶○○○")
+        device = emulator.BragiDevice(log=window.mouse_panel._on_entry)
+        for prop, value in ((0x125, 1.5), (0x126, 0.75), (0x127, 1.25)):
+            device.handle(bytes([0, 1, 0, emulator.CMD_SET]) + struct.pack("<Hf", prop, value))
+        self.assertEqual(self.statuses(window), "✓✓▶○○○")  # three of four: not yet
+        device.handle(bytes([0, 1, 0, emulator.CMD_SET]) + struct.pack("<Hf", 0x128, 0.5))
+        self.assertEqual(self.statuses(window), "✓✓✓▶○○")
+        self.assertEqual(window.calibration_panel.diagram.scalars(),
+                         Scalars(1.5, 0.75, 1.25, 0.5))
+        window.run_step(Step.USE)
+        self.assertEqual(window.driver_panel.values(), Scalars(1.5, 0.75, 1.25, 0.5))
+        self.assertIn("sent to the virtual mouse", window.driver_panel.message.text())
+
+    def test_steps_do_not_lock_anything(self) -> None:
+        window = self.make_window()  # mouse stopped, an older result file, driver at 1.0
+        drv = window.driver_panel
+        self.assertEqual(self.statuses(window), "▶✓○○○○")
+        self.assertTrue(drv.use_button.isEnabled())
+        drv.use_button.click()  # out of order, straight to the old result
+        self.assertEqual(self.statuses(window), "✓✓✓✓▶○")
+        drv.apply_button.click()
+        self.assertEqual(self.statuses(window), "✓✓✓✓✓▶")
+        drv.spins[0].setValue(1.2)  # editing by hand leaves the result behind
+        self.assertEqual(self.statuses(window)[3], "✓")
+        self.assertEqual(self.statuses(window)[5], "▶")
+
+    def test_step_actions_are_blocked_only_when_impossible(self) -> None:
+        shutil.rmtree(self.params.parent)  # module not loaded
+        window = self.make_window()
+        window.mouse_panel._factory = lambda pid, on_log: FakeSession(pid)
+        window.run_step(Step.START)
+        bar = window.steps_bar
+        self.assertEqual(bar.next_button.text(), "Reset to 1.0 and apply")
+        self.assertFalse(bar.next_button.isEnabled())
+        self.assertIn("not loaded", bar.next_label.text())
+
+    def test_primary_button_has_a_shortcut_and_names(self) -> None:
+        window = self.make_window()
+        button = window.steps_bar.next_button
+        self.assertEqual(button.shortcut().toString(), "Ctrl+Return")
+        self.assertEqual(button.accessibleName(), "Next step: Start virtual mouse")
+        self.assertTrue(button.font().bold())
+        self.assertIs(window.tab_order[0], button)
+
+    # ---- save to config -----------------------------------------------------
+
+    def test_save_to_config(self) -> None:
+        window = self.make_window()
+        drv = window.driver_panel
+        self.assertIs(drv.save_state, SaveState.MISSING_KEYS)
+        self.assertIn("no directional values", drv.saved_label.text())
+        drv.use_button.click()
+        drv.apply_button.click()
+        self.assertTrue(drv.save_button.isEnabled())
+        drv.save_button.click()
+        self.assertFalse(drv.save_button.isEnabled())  # one save at a time
+        self.wait_idle(window)
+        self.assertIs(drv.save_state, SaveState.SAVED)
+        self.assertEqual(drv.saved_label.text(), "✓ Saved to config.")
+        self.assertTrue(drv.message.text().startswith("✓ Saved to "))
+        self.assertFalse(drv.message.is_error)
+        self.assertEqual(self.saver.read_saved(), Scalars(1.0375, 0.9625, 1.125, 0.875))
+
+        drv.spins[0].setValue(1.05)
+        drv.apply_button.click()  # applied again, the file still has the old values
+        self.assertIs(drv.save_state, SaveState.DIFFERS)
+        self.assertEqual(drv.saved_label.text(), "Applied, not saved: lost on module reload.")
+
+        self.config.write_text("sens=1\ndirScaleXPos=1.05\ndirScaleXNeg=0.9625\n"
+                               "dirScaleYPos=1.125\ndirScaleYNeg=0.875\n")
+        drv.read_button.click()  # saved by other means: picked up on reading again
+        self.assertIs(drv.save_state, SaveState.SAVED)
+
+    def test_save_with_the_unmodified_tool_is_not_believed(self) -> None:
+        os.environ["QUADSENS_FAKE_MODE"] = "stock"
+        window = self.make_window()
+        drv = window.driver_panel
+        drv.use_button.click()
+        drv.apply_button.click()
+        drv.save_button.click()
+        self.wait_idle(window)
+        self.assertIs(drv.save_state, SaveState.MISSING_KEYS)
+        self.assertTrue(drv.message.is_error)
+        self.assertIn("Nothing directional was saved", drv.message.text())
+        self.assertIn("not the fork's", drv.message.text())
+        self.assertNotIn("✓", drv.saved_label.text())
+        self.assertEqual(self.statuses(window)[5], "▶")
+
+    def test_failed_save_is_reported(self) -> None:
+        os.environ["QUADSENS_FAKE_MODE"] = "fail"
+        window = self.make_window()
+        drv = window.driver_panel
+        drv.save_button.click()
+        self.wait_idle(window)
+        self.assertTrue(drv.message.is_error)
+        self.assertIn("exited with status 3", drv.message.text())
+        self.assertIn("cannot open config", drv.message.text())
+        self.assertTrue(drv.save_button.isEnabled())
+
+    def test_save_is_disabled_with_a_hint_when_the_tool_is_missing(self) -> None:
+        empty = self.tmp / "no-tools"
+        empty.mkdir()
+        self.saver = Saver(self.config, trusted_dirs=(str(empty),))
+        window = self.make_window()
+        drv = window.driver_panel
+        self.assertFalse(drv.save_button.isEnabled())
+        self.assertIn("was not found", drv.save_button.toolTip())
+        self.assertIn("was not found", drv.save_button.accessibleDescription())
+        self.assertIn("Cannot save", drv.saved_label.text())
+        self.assertIn("yeetmousectl", " ".join(window.setup_problems()))
+        drv.use_button.click()
+        drv.apply_button.click()
+        save = window.steps_bar.infos[5]
+        self.assertIn("was not found", save.blocked)
+        self.assertFalse(window.steps_bar.next_button.isEnabled())
+
+    # ---- advanced, log and diagram -------------------------------------------
+
+    def test_flip_y_is_tucked_away_and_off_by_default(self) -> None:
+        window = self.make_window()
+        drv = window.driver_panel
+        self.assertFalse(drv.flip_check.isChecked())
+        self.assertFalse(drv.advanced_toggle.isChecked())
+        self.assertTrue(drv.advanced.isHidden())
+        self.assertIn("verified", drv.flip_hint.text())
+        self.assertIn("verified", drv.flip_check.toolTip())
+        drv.advanced_toggle.click()
+        self.assertFalse(drv.advanced.isHidden())
+        self.assertEqual(window.calibration_panel.diagram.scalars(),
+                         Scalars(1.0375, 0.9625, 1.125, 0.875))
+        drv.flip_check.setChecked(True)
+        self.assertEqual(window.calibration_panel.diagram.scalars(),
+                         Scalars(1.0375, 0.9625, 0.875, 1.125))
+        window.close()
+
+        again = self.make_window()  # the stored setting keeps working and is not hidden
+        self.assertTrue(again.driver_panel.flip_check.isChecked())
+        self.assertTrue(again.driver_panel.advanced_toggle.isChecked())
+        self.assertFalse(again.driver_panel.advanced.isHidden())
+        self.assertEqual(again.calibration_panel.diagram.scalars(),
+                         Scalars(1.0375, 0.9625, 0.875, 1.125))
+
+    def test_protocol_log_is_collapsed_and_summarised(self) -> None:
+        window = self.make_window()
+        mouse = window.mouse_panel
+        self.assertFalse(mouse.log_shown())
+        self.assertTrue(mouse.log_box.isHidden())
+        self.assertEqual(mouse.summary_label.text(), "No events yet.")
+        mouse._on_entry({"t": 0.0, "event": "OPEN"})
+        self.assertTrue(mouse.summary_label.text().endswith("opened by a client"))
+        mouse._on_entry({"t": 0.0, "cmd": "GET", "id": 19})  # chatter: summary stays
+        self.assertTrue(mouse.summary_label.text().endswith("opened by a client"))
+        self.feed_write(window, 1.0375)
+        self.assertTrue(mouse.summary_label.text().endswith(
+            "calibration value received: XPos = 1.0375"))
+        self.assertEqual(mouse.log_view.blockCount(), 4)  # collected while hidden
+
+        mouse.log_toggle.click()
+        self.assertFalse(mouse.log_box.isHidden())
+        window.close()
+        again = self.make_window()  # remembered
+        self.assertTrue(again.mouse_panel.log_shown())
+        self.assertFalse(again.mouse_panel.log_box.isHidden())
+
+    def test_diagram_shows_the_four_multipliers_with_deviation(self) -> None:
+        window = self.make_window()
+        cal = window.calibration_panel
+        description = cal.diagram.accessibleDescription()
+        for expected in ("Right 1.0375 (+3.8 %)", "Left 0.9625 (-3.8 %)",
+                         "Down 1.1250 (+12.5 %)", "Up 0.8750 (-12.5 %)",
+                         "measured: E 1.0400", "SE 0.9500"):
+            self.assertIn(expected, description)
+        self.assertTrue(cal.details.isHidden())  # the raw numbers are secondary
+        cal.details_toggle.click()
+        self.assertFalse(cal.details.isHidden())
+        self.assertIn("NE 0.990", cal.directional_label.text())
+        window.show()
+        _app.processEvents()
+        self.assertFalse(cal.diagram.grab().isNull())  # painting does not raise
+
+        drv = window.driver_panel
+        self.assertEqual([label.text() for label in drv.deviation_labels], ["0.0 %"] * 4)
+        drv.use_button.click()
+        drv.apply_button.click()
+        self.assertEqual([label.text() for label in drv.deviation_labels],
+                         ["+3.8 %", "-3.8 %", "+12.5 %", "-12.5 %"])
+
+    def test_hints_and_messages_do_not_grow_the_window(self) -> None:
+        # Worst case of problems: no uhid, module not loaded, no result, no tool.
+        self.uhid.unlink()
+        shutil.rmtree(self.params.parent)
+        shutil.rmtree(self.tmp / "Users")
+        empty = self.tmp / "no-tools"
+        empty.mkdir()
+        self.saver = Saver(self.config, trusted_dirs=(str(empty),))
+        broken = self.make_window()
+        broken.resize(720, 520)
+        broken.show()
+        for _ in range(5):
+            _app.processEvents()
+        hint = broken.minimumSizeHint()
+        self.assertLessEqual(hint.width(), 720, hint)
+        self.assertLessEqual(hint.height(), 520, hint)
+        broken.close()
+
+        # And the busiest good case: applied and saved, with both messages showing.
+        self.setUp()
+        window = self.make_window()
+        window.resize(720, 520)
+        window.show()
+        window.driver_panel.use_button.click()
+        window.driver_panel.apply_button.click()
+        window.driver_panel.save_button.click()
+        self.wait_idle(window)
+        for _ in range(5):
+            _app.processEvents()
+        hint = window.minimumSizeHint()
+        self.assertLessEqual(hint.width(), 720, hint)
+        self.assertLessEqual(hint.height(), 520, hint)
 
 
 if __name__ == "__main__":
