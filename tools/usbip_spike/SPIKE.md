@@ -19,7 +19,7 @@ only proves that the program talks to its own small client.
 
 ## Check that it runs at all
 
-    quadsens-usbip-spike.exe --selftest        (Windows)
+    python tools\usbip_spike\usbip_spike.py --selftest   (Windows)
     python3 tools/usbip_spike/usbip_spike.py --selftest
 
 It prints 16 lines ending in `SELFTEST PASS`. No driver is needed for this.
@@ -33,7 +33,7 @@ It prints 16 lines ending in `SELFTEST PASS`. No driver is needed for this.
    while doing so (USB devices drop out for a moment).
 2. Start the spike in a terminal and leave it running:
 
-       quadsens-usbip-spike.exe --log spike-log.jsonl
+       python tools\usbip_spike\usbip_spike.py --log spike-log.jsonl
 
    It prints `listening on 127.0.0.1:3240, busid 1-1`.
 3. In a second terminal:

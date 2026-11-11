@@ -7,7 +7,7 @@ name: build
 
 on:
   push:
-    branches: [main, feature/windows, spike/usbip]
+    branches: [main]
     tags: ["v*"]
   pull_request:
 
@@ -100,9 +100,4 @@ jobs:
         with:
           name: quadsens-windows
           path: dist/quadsens.exe
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        with:
-          name: quadsens-usbip-spike-windows
-          path: dist/quadsens-usbip-spike.exe
           if-no-files-found: error
