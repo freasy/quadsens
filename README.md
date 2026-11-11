@@ -189,9 +189,10 @@ the *Product ID* box, use the same value here.
 
 ## Usage
 
-The row on top of the window shows six steps. Each is marked as done (✓),
-current (▶) or pending (○), and the button on the right always carries out the
-current one (Ctrl+Return). The steps are worked out from what QuadSens finds,
+The row on top of the window shows six steps. A done step has a check mark,
+the current one a filled circle and a bold title, pending ones are muted. The
+filled button on the right always carries out the current step (Ctrl+Return);
+the button that does the same inside a card is filled as well. The steps are worked out from what QuadSens finds,
 not from what you clicked, and nothing is locked: the buttons in the panels
 work in any order.
 
@@ -231,6 +232,10 @@ Less common controls:
   swapped on your setup. *Apply saved values on start* makes QuadSens write
   the last applied values again whenever it starts; it is not needed once the
   values are saved to the config.
+- *View > Use system style* switches the application's own look off and shows
+  the window in the plain style of the desktop; the choice is remembered.
+  Starting with `QUADSENS_NATIVE_STYLE=1` in the environment does the same
+  without touching the setting.
 - *File > Open result folder* (Ctrl+O) opens the folder of the result file.
   *Help > First steps* (F1) shows the steps, and *Help > Setup help* lists
   what is not set up yet together with the commands to fix it.
@@ -321,6 +326,16 @@ Install the userspace tools of the yeetmouse fork.
 The installed `yeetmousectl` is the unmodified one, which does not know the
 directional values. Install the fork's tools and save again.
 
+## Appearance
+
+QuadSens uses Qt's Fusion style with a stylesheet that is generated from the
+desktop palette when it starts and again whenever the palette changes, so it
+follows light and dark colour schemes and the desktop's accent colour. Text
+and the outlines of controls are kept at WCAG 2.1 AA contrast; if a palette
+does not provide that, the colours are strengthened. There are no animations.
+If the look does not suit your desktop, switch it off with *View > Use system
+style* or `QUADSENS_NATIVE_STYLE=1`.
+
 ## Development
 
 Run the tests from the repository root:
@@ -337,7 +352,12 @@ screenshots from fixture data:
 ```sh
 python3 tools/make_screenshot.py
 python3 tools/make_screenshot.py --dark
+python3 tools/make_screenshot.py --sheet /tmp/quadsens-sheet.png
 ```
+
+The last command renders a contact sheet of the controls in their normal,
+hover, pressed, focused and disabled states, in light and dark, for checking
+changes to the look by eye.
 
 Layout:
 
@@ -349,9 +369,11 @@ quadsens/              application package
   persist.py           save to the config file and verify it (no Qt)
   steps.py             the six guided steps, derived from state (no Qt)
   model.py             value types and number parsing (no Qt)
+  colors.py            colour mixing, contrast and the derived colour set (no Qt)
   hints.py, about.py   user-facing texts (no Qt)
   resources.py         locate bundled files (no Qt)
-  ui/                  Qt widgets; ui/qt.py selects PySide6 or PyQt6
+  ui/                  Qt widgets; ui/qt.py selects PySide6 or PyQt6,
+                       ui/theme.py builds the stylesheet
 helper/quadsens-apply  helper run through pkexec
 assets/quadsens.svg    application icon
 packaging/entry.py     entry point for the PyInstaller build
