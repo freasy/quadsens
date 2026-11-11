@@ -60,8 +60,9 @@ chmod +x quadsens
 ./quadsens
 ```
 
-There may be no release yet. In that case build the binary yourself, which
-takes one command.
+The binary bundles Python and Qt but still needs a glibc at least as new as
+the one it was built with (see the release notes). If it does not start on
+your distribution, build it yourself, which takes one command.
 
 The one-time setup below needs two files from this repository
 (`99-quadsens.rules` and, optionally, `helper/quadsens-apply`), so clone it or
