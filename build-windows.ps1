@@ -34,3 +34,16 @@ if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 
 Write-Host "Built: $PSScriptRoot\dist\quadsens.exe"
+
+# Second output: the USB/IP spike, a throwaway test program (see
+# tools\usbip_spike\SPIKE.md). Console program, so that its log is visible.
+# It needs no Qt; excluding the bindings keeps it small.
+& .venv\Scripts\pyinstaller.exe --noconfirm --onefile --console --name quadsens-usbip-spike `
+    --paths . --exclude-module PySide6 --exclude-module PyQt6 --exclude-module tkinter `
+    tools\usbip_spike\usbip_spike.py
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed for the USB/IP spike" }
+
+& dist\quadsens-usbip-spike.exe --selftest
+if ($LASTEXITCODE -ne 0) { throw "the USB/IP spike failed its self-test" }
+
+Write-Host "Built: $PSScriptRoot\dist\quadsens-usbip-spike.exe"
