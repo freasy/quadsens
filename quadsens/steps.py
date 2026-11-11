@@ -71,6 +71,7 @@ class FlowState:
     mouse_problem: str = ""            # why the virtual mouse cannot be started, or ""
     driver: Scalars | None = None      # values the driver uses, None if unknown
     driver_problem: str = ""           # why nothing can be written to the driver, or ""
+    driver_missing: bool = False       # ... because the fork is not installed or loaded
     result_available: bool = False     # there is a calibration result to take values from
     result_is_new: bool = False        # ... and it arrived after the mouse start / reset
     result_in_editor: bool = False     # the new values are the result's values
@@ -85,6 +86,7 @@ class StepInfo:
     status: Status
     detail: str          # one sentence: what to do, or what was found
     blocked: str = ""    # why the step's action cannot work right now, or ""
+    fix: str = ""        # what would unblock it: "driver-setup" or ""
 
     @property
     def number(self) -> int:
@@ -192,8 +194,10 @@ def derive(state: FlowState) -> list[StepInfo]:
             status, current_given = Status.CURRENT, True
         else:
             status = Status.PENDING
-        steps.append(StepInfo(step, status, _detail(step, step in done, state),
-                              "" if step in done else _blocked(step, state)))
+        blocked = "" if step in done else _blocked(step, state)
+        fix = (FIX_DRIVER if blocked and state.driver_missing
+               and blocked == state.driver_problem else "")
+        steps.append(StepInfo(step, status, _detail(step, step in done, state), blocked, fix))
     return steps
 
 
@@ -205,4 +209,6 @@ def current_step(steps: list[StepInfo]) -> StepInfo | None:
     return None
 
 
+FIX_DRIVER = "driver-setup"
+FIX_ACTIONS = {FIX_DRIVER: "Driver setup…"}
 ALL_DONE = "All six steps are done: the calibration is applied and saved."

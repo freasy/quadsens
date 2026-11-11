@@ -279,14 +279,18 @@ class DriverPanel(Card):
         """Why nothing can be written to the driver right now, or ""."""
         status = self.state.status
         if status is DriverStatus.NOT_LOADED:
-            return "The yeetmouse module is not loaded (Help > Setup help)."
+            return "The yeetmouse module is not loaded (Help > Driver setup)."
         if status is DriverStatus.UNSUPPORTED:
-            return "The loaded yeetmouse module is not the fork (Help > Setup help)."
+            return "The loaded yeetmouse module is not the fork (Help > Driver setup)."
         if status is DriverStatus.NOT_READABLE and not self._driver.helper_installed():
             return "The driver is not writable for you (Help > Setup help)."
         return ""
 
     # ---- actions ----------------------------------------------------------
+
+    def fork_missing(self) -> bool:
+        """True when the forked module is not loaded: the driver setup can fix that."""
+        return self.state.status in (DriverStatus.NOT_LOADED, DriverStatus.UNSUPPORTED)
 
     def refresh(self) -> DriverState:
         """Read the driver and the config file and show what they hold."""

@@ -6,6 +6,7 @@ Usage: python3 tools/make_screenshot.py [--theme quadsens|system] [--dark]
        python3 tools/make_screenshot.py --sheet OUTPUT.png
        python3 tools/make_screenshot.py [--theme ...] [--dark] --diagrams DIRECTORY
        python3 tools/make_screenshot.py [--theme ...] [--dark] --gallery DIRECTORY
+       python3 tools/make_screenshot.py [--theme ...] [--dark] --setup OUTPUT.png
 
 Uses a temp directory in place of sysfs and of the config file, a made-up
 calibration file and a stand-in for yeetmousectl. It does not create the uhid
@@ -29,6 +30,9 @@ and the stepper, once per theme (black and red, system light, system dark).
 problem state with warning and error banners, the About dialog and the open
 Theme menu.
 
+--setup renders the driver setup dialog for a made-up machine that has the
+unmodified driver installed (default output: docs/screenshot-driver-setup.png).
+
 The calibration data is made up but consistent: the four multipliers are the
 1-2-1 weighted averages of the eight measured values, a few percent around 1.
 """
@@ -50,6 +54,7 @@ sys.path.insert(0, str(ROOT))
 from quadsens import emulator  # noqa: E402
 from quadsens.diagram import ZOOMS  # noqa: E402
 from quadsens.driver import PARAM_NAMES, Driver  # noqa: E402
+from quadsens.driver_setup import Probe  # noqa: E402
 from quadsens.model import Scalars  # noqa: E402
 from quadsens.persist import SaveState, Saver  # noqa: E402
 from quadsens.steps import FlowState, Step, derive  # noqa: E402
@@ -57,6 +62,7 @@ from quadsens.ui.main_window import MainWindow  # noqa: E402
 from quadsens.ui.compass import DirectionDiagram  # noqa: E402
 from quadsens.ui.qt import BINDING, QtCore, QtGui, QtWidgets  # noqa: E402
 from quadsens.ui.scale_spin import ScaleSpinBox  # noqa: E402
+from quadsens.ui.setup_dialog import DriverSetupDialog  # noqa: E402
 from quadsens.ui.status import Card, Disclosure, MessageLabel  # noqa: E402
 from quadsens.ui.steps_bar import StepsBar  # noqa: E402
 from quadsens.ui.theme import ThemeManager, set_primary  # noqa: E402
@@ -335,6 +341,51 @@ def gallery(directory: Path, mode: str) -> None:
     print("gallery in %s (%s)" % (directory, mode))
 
 
+def setup_render(output: Path) -> None:
+    """The driver setup dialog for a fixture machine: unmodified driver installed."""
+    app = QtWidgets.QApplication.instance()
+    with tempfile.TemporaryDirectory(prefix="quadsens-demo-") as tmp:
+        root = Path(tmp, "root")
+        tools = Path(tmp, "bin")
+        tools.mkdir()
+        kernel = "6.12.0-demo"
+        for folder in ("usr/src/yeetmouse-driver-0.9.5", "usr/bin", "etc",
+                       "run/systemd/system", f"lib/modules/{kernel}/build",
+                       "sys/module/yeetmouse/parameters"):
+            (root / folder).mkdir(parents=True)
+        (root / "usr/src/yeetmouse-driver-0.9.5/dkms.conf").write_text("x")
+        (root / "usr/bin/yeetmousectl").write_text("unmodified tool")
+        (root / "etc/os-release").write_text("ID=arch\n")
+        answers = {"status": f"yeetmouse-driver/0.9.5, {kernel}, x86_64: installed\n",
+                   "group": "yeetmouse:x:931:demo\n"}
+
+        def run(argv: list[str]) -> tuple[int, str]:
+            if argv[1:2] == ["status"]:
+                return 0, answers["status"]
+            if argv[1:3] == ["group", "yeetmouse"]:
+                return 0, answers["group"]
+            return 1, ""
+
+        present = ("dkms", "git", "make", "cc", "c++", "bash", "pkexec", "getent")
+        probe = Probe(root=root, run=run, kernel=kernel,
+                      which=lambda name: f"/usr/bin/{name}" if name in present else None,
+                      session_groups=lambda: {931}, user=lambda: "demo")
+        dialog = DriverSetupDialog(None, probe)
+        dialog.resize(760, 640)
+        dialog.show()
+        for _ in range(5):
+            app.processEvents()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        dialog.grab().save(str(output))
+        if output.parent != ROOT / "docs":   # the script page too, for checking by eye
+            dialog.tabs.setCurrentIndex(1)
+            for _ in range(3):
+                app.processEvents()
+            dialog.grab().save(str(output.with_name(output.stem + "-script.png")))
+        dialog.close()
+    print("driver setup: %s" % output)
+
+
 def _options(argv: list[str]) -> tuple[list[str], str, bool]:
     """Strip --theme and --dark from the arguments."""
     rest: list[str] = []
@@ -356,9 +407,11 @@ def _options(argv: list[str]) -> tuple[list[str], str, bool]:
 
 def main(argv: list[str]) -> int:
     argv, mode, dark = _options(argv)
-    for flag, render in (("--diagrams", None), ("--gallery", None)):
+    for flag, render in (("--diagrams", None), ("--gallery", None), ("--setup", None)):
         if flag in argv:
             rest = [arg for arg in argv if arg != flag]
+            if flag == "--setup" and len(rest) < 2:
+                rest.append(str(ROOT / "docs" / "screenshot-driver-setup.png"))
             if len(rest) < 2:
                 print("usage: make_screenshot.py %s DIRECTORY" % flag, file=sys.stderr)
                 return 2
@@ -371,6 +424,8 @@ def main(argv: list[str]) -> int:
                 manager.apply()
             if flag == "--diagrams":
                 diagram_renders(Path(rest[1]))
+            elif flag == "--setup":
+                setup_render(Path(rest[1]))
             else:
                 gallery(Path(rest[1]), mode)
             return 0

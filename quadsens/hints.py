@@ -10,6 +10,7 @@ from .driver import DriverState, DriverStatus
 from .persist import TOOL_NAME, TRUSTED_DIRS, SaveState
 
 SETUP_HELP = "Help > Setup help"
+DRIVER_SETUP = "Help > Driver setup"
 
 FIRST_STEPS: tuple[str, ...] = (
     "Start the virtual mouse, then start the game.",
@@ -68,10 +69,9 @@ def driver_status(state: DriverState, helper_installed: bool = True) -> str:
     if status is DriverStatus.OK:
         return "Status: values read from the driver."
     if status is DriverStatus.NOT_LOADED:
-        return ("Status: module not loaded. Load the forked yeetmouse module, then "
-                "Read again.")
+        return f"Status: module not loaded. Install or load the fork ({DRIVER_SETUP})."
     if status is DriverStatus.UNSUPPORTED:
-        return f"Status: no DirScale parameters, not the fork's module ({SETUP_HELP})."
+        return f"Status: no DirScale parameters, not the fork's module ({DRIVER_SETUP})."
     if status is DriverStatus.NOT_READABLE:
         return f"Status: not readable. Join group yeetmouse, log in again ({SETUP_HELP})."
     return f"Status: error reading the driver ({state.message})."
@@ -83,11 +83,13 @@ def driver_help(state: DriverState, helper_installed: bool = True) -> str:
     if status is DriverStatus.OK:
         return ""
     if status is DriverStatus.NOT_LOADED:
-        return ("The yeetmouse module is not loaded. Load the forked module "
-                "(sudo modprobe yeetmouse), then press Read again.")
+        return ("The yeetmouse module is not loaded. If the fork is installed, load it "
+                "(sudo modprobe yeetmouse) and press Read again; otherwise install it "
+                f"with {DRIVER_SETUP}.")
     if status is DriverStatus.UNSUPPORTED:
         return ("The loaded yeetmouse module has no DirScale parameters. Install the "
-                "forked module (branch feature/directional-scalars) and reload it.")
+                f"forked module with {DRIVER_SETUP} (or by hand from the branch "
+                "feature/directional-scalars) and reload it.")
     if status is DriverStatus.NOT_READABLE:
         text = ("The driver values are not readable. Join group yeetmouse (sudo usermod "
                 "-aG yeetmouse $USER) and log in again. If you are a member already, the "
@@ -101,7 +103,8 @@ def driver_help(state: DriverState, helper_installed: bool = True) -> str:
 def tool_missing() -> str:
     """Why Save to config is not available."""
     return (f"{TOOL_NAME} was not found in {', '.join(TRUSTED_DIRS)}. Install the "
-            "userspace tools of the yeetmouse fork; Save to config needs them.")
+            f"userspace tools of the yeetmouse fork ({DRIVER_SETUP} does that); Save to "
+            "config needs them.")
 
 
 def save_state_text(state: SaveState, tool_found: bool = True) -> str:

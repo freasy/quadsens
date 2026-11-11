@@ -508,5 +508,5 @@ def launch(action: str, dry_run: bool = False, text: str | None = None,
         return Launch([found, "--disable-internal-agent", str(INSTALLED_SCRIPT), action],
                       "", f"Runs the installed copy {INSTALLED_SCRIPT} through pkexec.")
     return Launch([found, "--disable-internal-agent", SHELL, "-s", "--", action], text,
-                  "Runs through pkexec; the text above is fed to /bin/sh on its standard "
+                  "Runs through pkexec; this text is fed to /bin/sh on its standard "
                   "input, so exactly what is shown is what runs.")

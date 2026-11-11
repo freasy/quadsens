@@ -33,6 +33,7 @@ from .driver_panel import SAME_VALUE, DriverPanel
 from .icon import app_icon
 from .mouse_panel import MousePanel
 from .qt import QtCore, QtGui, QtWidgets
+from .setup_dialog import DriverSetupDialog
 from .status import SPACE_L, SPACE_M
 from .steps_bar import StepsBar
 from .theme import MODE_TITLES, MODES, ThemeManager, env_mode, set_primary, stored_mode
@@ -63,6 +64,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # came last. None until one of the two happened in this session.
         self._baseline: float | None = None
         self.info_box: QtWidgets.QMessageBox | None = None
+        self.setup_dialog: DriverSetupDialog | None = None
+        # Replaceable, so that tests describe another machine than this one.
+        self.make_setup_dialog: Callable[[], DriverSetupDialog] = (
+            lambda: DriverSetupDialog(self))
         # Replaceable, so that tests do not start a file manager.
         self.open_url: Callable[[QtCore.QUrl], object] = QtGui.QDesktopServices.openUrl
         self.setWindowTitle(about.APP_NAME)
@@ -107,6 +112,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.driver_panel.applied.connect(self._driver_applied)
         self.driver_panel.flip_changed.connect(self.calibration_panel.set_flip_y)
         self.steps_bar.action_requested.connect(self.run_step)
+        self.steps_bar.fix_requested.connect(lambda _fix: self.show_driver_setup())
 
         # Keyboard order follows the workflow: next step, mouse, result, driver.
         order: list[QtWidgets.QWidget] = [
@@ -205,6 +211,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setup_action = QtGui.QAction("&Setup help", self)
         self.setup_action.triggered.connect(self.show_setup_help)
         help_menu.addAction(self.setup_action)
+        self.driver_setup_action = QtGui.QAction("&Driver setup…", self)
+        self.driver_setup_action.setToolTip(
+            "See which yeetmouse driver is installed, and install or revert the fork")
+        self.driver_setup_action.triggered.connect(self.show_driver_setup)
+        help_menu.addAction(self.driver_setup_action)
         help_menu.addSeparator()
         self.about_action = QtGui.QAction("&About %s" % about.APP_NAME, self)
         self.about_action.setMenuRole(QtGui.QAction.MenuRole.AboutRole)
@@ -252,8 +263,32 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             body = ("<p>Nothing to fix: the virtual mouse can be created, the driver "
                     "values are readable and the save tool is installed.</p>")
-        self._open_box("Setup help", "<h3>Setup help</h3>%s<p>The README section "
-                       "\"One-time setup\" has the details.</p>" % body)
+        self._open_box("Setup help", "<h3>Setup help</h3>%s<p>Help &gt; Driver setup "
+                       "shows which driver is installed and can install the fork. The "
+                       "README section \"One-time setup\" has the details.</p>" % body)
+
+    def show_driver_setup(self) -> None:
+        """Open the driver setup; it never starts anything by itself."""
+        if self.setup_dialog is None:
+            dialog = self.make_setup_dialog()
+            dialog.changed.connect(self._driver_setup_changed)
+            dialog.finished.connect(self._driver_setup_closed)
+            self.setup_dialog = dialog
+        self.setup_dialog.refresh()
+        self.setup_dialog.show()
+        self.setup_dialog.raise_()
+        self.setup_dialog.activateWindow()
+
+    def _driver_setup_changed(self) -> None:
+        """An install or revert ran: the driver panel may see another module now."""
+        self.driver_panel.refresh()
+        self.update_steps()
+
+    def _driver_setup_closed(self, _result: int = 0) -> None:
+        dialog, self.setup_dialog = self.setup_dialog, None
+        if dialog is not None:
+            dialog.deleteLater()
+        self._driver_setup_changed()
 
     def open_result_folder(self) -> None:
         """Open the folder of the newest result file in the file manager."""
@@ -309,6 +344,7 @@ class MainWindow(QtWidgets.QMainWindow):
             mouse_problem=uhid_short(mouse.access()),
             driver=driver,
             driver_problem=panel.write_problem(),
+            driver_missing=panel.fork_missing(),
             result_available=wanted is not None,
             result_is_new=(result is not None and self._baseline is not None
                            and result.time > self._baseline),
@@ -392,5 +428,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._settings.sync()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802 (Qt name)
+        if self.setup_dialog is not None and self.setup_dialog.is_busy():
+            # Quitting now would cut off a half-done driver install.
+            self.setup_dialog.raise_()
+            self.setup_dialog.close()   # refuses and says why
+            event.ignore()
+            return
         self.shutdown()
         super().closeEvent(event)

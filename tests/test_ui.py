@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - depends on the environment
     raise unittest.SkipTest("no Qt binding (PySide6) installed") from None
 
 import quadsens
-from quadsens import about, colors, emulator, hints
+from quadsens import about, colors, driver_setup, emulator, hints
 from quadsens.driver import PARAM_NAMES, Driver
 from quadsens.model import Scalars
 from quadsens.persist import Saver, SaveState
@@ -33,6 +33,7 @@ from quadsens.ui.driver_panel import CHANGED_MARK
 from quadsens.ui.main_window import MainWindow, about_html
 from quadsens.ui.mouse_panel import WRITE_PREFIX, write_line_colors
 from quadsens.ui.scale_spin import ScaleSpinBox
+from quadsens.ui.setup_dialog import DriverSetupDialog
 from quadsens.ui.status import StatusDot
 from quadsens.ui.theme import (
     CONTROL_HEIGHT,
@@ -415,7 +416,7 @@ class MainWindowTest(unittest.TestCase):
         drv.read_button.click()
         self.assertFalse(drv.status_label.isHidden())
         self.assertIn("no DirScale parameters", drv.status_label.text())
-        self.assertIn("Help > Setup help", drv.status_label.text())
+        self.assertIn("Help > Driver setup", drv.status_label.text())
         self.assertTrue(drv.pending_label.isHidden())  # the problem takes its place
         self.assertTrue(drv.saved_label.isHidden())
         self.assertTrue(drv.apply_button.isEnabled())
@@ -425,7 +426,7 @@ class MainWindowTest(unittest.TestCase):
 
         shutil.rmtree(self.params.parent)
         drv.read_button.click()
-        self.assertIn("Load the forked yeetmouse module", drv.status_label.text())
+        self.assertIn("Install or load the fork", drv.status_label.text())
         window.setup_action.trigger()
         box = window.info_box
         assert box is not None
@@ -783,9 +784,18 @@ class MainWindowTest(unittest.TestCase):
         window.mouse_panel._factory = lambda pid, on_log: FakeSession(pid)
         window.run_step(Step.START)
         bar = window.steps_bar
-        self.assertEqual(bar.next_button.text(), "Reset to 1.0 and apply")
-        self.assertFalse(bar.next_button.isEnabled())
+        # Resetting cannot work without the module; the button leads to the fix instead.
+        self.assertEqual(bar.next_button.text(), "Driver setup…")
+        self.assertTrue(bar.next_button.isEnabled())
         self.assertIn("not loaded", bar.next_label.text())
+        self.assertEqual(window.steps_bar.infos[1].fix, "driver-setup")
+        opened: list[str] = []
+        window.show_driver_setup = lambda: opened.append("setup")  # type: ignore[method-assign]
+        window.steps_bar.fix_requested.disconnect()
+        window.steps_bar.fix_requested.connect(lambda _fix: window.show_driver_setup())
+        bar.next_button.click()
+        self.assertEqual(opened, ["setup"])
+        self.assertEqual(len(bar.chips), 6)   # the stepper did not get longer
 
     def test_primary_button_has_a_shortcut_and_names(self) -> None:
         window = self.make_window()
@@ -1334,6 +1344,273 @@ class MainWindowTest(unittest.TestCase):
         for name in ("QPropertyAnimation", "QVariantAnimation", "QTimeLine", "QMovie",
                      "setGraphicsEffect"):
             self.assertNotIn(name, source)
+
+
+class DriverSetupDialogTest(unittest.TestCase):
+    """The dialog against a fake machine; the script runs for real, without root."""
+
+    def setUp(self) -> None:
+        from tests.test_driver_setup import FakeSystem
+        self.sys = FakeSystem(self)
+        (self.sys.bin / "pkexec").write_text("")
+        self.confirmations: list[tuple[str, str]] = []
+        self.answer = True
+        self.stub_fail = ""
+        self.dialogs: list[DriverSetupDialog] = []
+
+    def tearDown(self) -> None:
+        for dialog in self.dialogs:
+            self.wait(dialog)
+            dialog.close()
+            dialog.deleteLater()
+        _app.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete.value)
+        _app.processEvents()
+
+    def launcher(self, action: str, dry_run: bool = False, text: str | None = None,
+                 **_kwargs: object) -> driver_setup.Launch:
+        # As the real one, minus pkexec: the script still arrives on standard input.
+        argv = ["/bin/sh", "-s", "--", *(["--dry-run"] if dry_run else []), action]
+        return driver_setup.Launch(argv, text or driver_setup.script_text(), "test launch")
+
+    def confirm(self, action: str, text: str) -> bool:
+        self.confirmations.append((action, text))
+        return self.answer
+
+    def make(self) -> DriverSetupDialog:
+        env = {"PATH": "/usr/bin:/bin", "QUADSENS_TEST_ROOT": str(self.sys.root),
+               "QUADSENS_TEST_PATH": str(self.sys.bin),
+               "QUADSENS_STUB_LOG": str(self.sys.log), "QUADSENS_STUB_FAIL": self.stub_fail,
+               "PKEXEC_UID": "1000"}
+        dialog = DriverSetupDialog(None, self.sys.probe(), self.launcher, self.confirm, env)
+        self.dialogs.append(dialog)
+        return dialog
+
+    def wait(self, dialog: DriverSetupDialog) -> None:
+        deadline = time.monotonic() + 20
+        while dialog.is_busy() and time.monotonic() < deadline:
+            _app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 50)
+        self.assertFalse(dialog.is_busy())
+
+    def test_shows_state_prerequisites_script_and_changes(self) -> None:
+        self.sys.stock()
+        self.sys.userspace(fork_tool=False)
+        self.sys.group()
+        dialog = self.make()
+        self.assertEqual(dialog.windowTitle(), "Driver setup")
+        self.assertIn("2a3e21956ef5a2ddfc4523a7ad4ef8117f6f4913", dialog.source_label.text())
+        self.assertIn("https://github.com/freasy/YeetMouse.git", dialog.source_label.text())
+        state = dialog.state_label.text()
+        self.assertIn("✕ Driver: the unmodified driver 0.9.5 is installed", state)
+        self.assertIn("✕ Module: not loaded.", state)
+        self.assertIn("✓ Group yeetmouse: your session is a member.", state)
+        self.assertIn("ℹ No previous driver is kept", state)
+        checks = dialog.checks_label.text().splitlines()
+        self.assertEqual(len(checks), 9)
+        self.assertTrue(all(line.startswith("✓ ") for line in checks))
+        self.assertIn("moves its source from /usr/src to /usr/local/src",
+                      dialog.install_changes.text())
+        self.assertIn("Mouse acceleration is off for a moment",
+                      dialog.install_changes.text())
+        self.assertIn("no yeetmouse module is installed", dialog.revert_changes.text())
+        # The script shown is the script that would be fed, byte for byte.
+        shown = dialog.script_view.toPlainText()
+        self.assertEqual(shown, driver_setup.script_text())
+        self.assertTrue(dialog.script_view.isReadOnly())
+        self.assertEqual([dialog.tabs.tabText(i) for i in range(dialog.tabs.count())],
+                         ["O&verview", "&Script", "Out&put"])
+        self.assertTrue(dialog.install_button.isEnabled())
+        self.assertTrue(dialog.install_button.property("primary"))
+        self.assertFalse(dialog.revert_button.isEnabled())       # nothing to revert
+        self.assertIn("nothing to revert", dialog.revert_button.toolTip())
+
+    def test_install_needs_the_prerequisites_and_a_confirmation(self) -> None:
+        (self.sys.bin / "dkms").unlink()
+        dialog = self.make()
+        self.assertFalse(dialog.install_button.isEnabled())
+        self.assertIn("Missing: DKMS", dialog.install_button.toolTip())
+        self.assertIn("✕ DKMS: not installed. Install it: sudo pacman -S dkms",
+                      dialog.checks_label.text())
+        dialog.run(driver_setup.INSTALL)      # even when called directly: refused
+        self.assertFalse(dialog.is_busy())
+        self.assertTrue(dialog.result.is_error)
+        self.assertEqual(self.confirmations, [])
+        self.assertEqual(self.sys.calls(), [])
+
+    def test_packaged_driver_blocks_the_install(self) -> None:
+        self.sys.stock()
+        self.sys.packaged("usr/src/yeetmouse-driver-0.9.5")
+        dialog = self.make()
+        self.assertFalse(dialog.install_button.isEnabled())
+        self.assertIn("remove that package first", dialog.install_button.toolTip())
+
+    def test_declined_confirmation_runs_nothing(self) -> None:
+        self.answer = False
+        dialog = self.make()
+        dialog.install_button.click()
+        self.assertFalse(dialog.is_busy())
+        self.assertEqual([action for action, _text in self.confirmations], ["install"])
+        self.assertIn("builds a kernel module as root", self.confirmations[0][1])
+        self.assertIn("cancelled, nothing was changed", dialog.result.text())
+        self.assertEqual(self.sys.calls(), [])
+
+    def test_install_runs_the_script_from_standard_input_and_reports(self) -> None:
+        self.sys.stock()
+        self.sys.group()
+        dialog = self.make()
+        changed: list[int] = []
+        dialog.changed.connect(lambda: changed.append(1))
+        dialog.install_button.click()
+        self.assertTrue(dialog.is_busy())
+        self.assertFalse(dialog.install_button.isEnabled())   # one run at a time
+        self.assertEqual(dialog.tabs.currentIndex(), 2)
+        dialog.close()                                        # refused while it runs
+        self.assertTrue(dialog.is_busy())
+        self.wait(dialog)
+        output = dialog.output_view.toPlainText()
+        self.assertIn("[1/9] Checking what is needed", output)
+        self.assertIn("[9/9] Loading the new module", output)
+        self.assertIn("verified: commit 2a3e21956ef5a2ddfc4523a7ad4ef8117f6f4913", output)
+        self.assertTrue(dialog.result.text().startswith("✓ Install forked driver: finished."))
+        self.assertIn("Log out and in again", dialog.result.text())
+        self.assertFalse(dialog.result.is_error)
+        self.assertEqual(changed, [1])
+        calls = self.sys.calls()
+        self.assertIn("dkms remove yeetmouse-driver/0.9.5 --all", calls)
+        self.assertIn("dkms install yeetmouse-driver/0.9.5+dirscale1", calls)
+        self.assertTrue(self.sys.exists("usr/local/src/yeetmouse-driver-0.9.5"))
+        # Looked again afterwards: the kept driver is known now.
+        self.assertIn("Previous driver kept for Revert: 0.9.5", dialog.state_label.text())
+
+    def test_failure_names_the_state_and_the_way_back(self) -> None:
+        self.sys.stock()
+        self.sys.group()
+        self.stub_fail = "dkms install yeetmouse-driver/0.9.5+dirscale1"
+        dialog = self.make()
+        dialog.install_button.click()
+        self.wait(dialog)
+        self.assertTrue(dialog.result.is_error)
+        text = dialog.result.text()
+        self.assertIn("Install forked driver failed (exit status 9)", text)
+        self.assertIn("State: the previous driver 0.9.5 is installed again.", text)
+        self.assertIn("Revert to previous driver", text)
+        self.assertIn("FAILED", dialog.output_view.toPlainText())
+
+    def test_dry_run_needs_no_confirmation_and_changes_nothing(self) -> None:
+        (self.sys.bin / "pkexec").unlink()     # not even pkexec is needed for it
+        self.sys.fork()
+        self.sys.source("0.9.5", "usr/local/src")
+        dialog = self.make()
+        self.assertFalse(dialog.revert_button.isEnabled())
+        dialog.dry_check.setChecked(True)
+        self.assertTrue(dialog.revert_button.isEnabled())
+        dialog.revert_button.click()
+        self.wait(dialog)
+        self.assertEqual(self.confirmations, [])
+        output = dialog.output_view.toPlainText()
+        self.assertIn("$ /bin/sh -s -- --dry-run revert", output)
+        self.assertIn("Dry run: nothing is changed.", output)
+        self.assertIn("would run:", output)
+        self.assertIn("dry run finished. Nothing was changed", dialog.result.text())
+        self.assertEqual(self.sys.calls(), [])
+        self.assertTrue(self.sys.exists("usr/local/src/yeetmouse-driver-0.9.5"))
+
+    def test_revert_of_the_hand_installed_state(self) -> None:
+        self.sys.fork()
+        self.sys.userspace()
+        self.sys.group()
+        self.sys.source("0.9.5", "usr/local/src")
+        dialog = self.make()
+        self.assertTrue(dialog.revert_button.isEnabled())
+        self.assertFalse(dialog.install_button.property("primary"))   # already installed
+        dialog.revert_button.click()
+        self.wait(dialog)
+        self.assertEqual([action for action, _text in self.confirmations], ["revert"])
+        self.assertTrue(dialog.result.text().startswith("✓ Revert to previous driver"))
+        self.assertEqual(self.sys.calls()[:2], [
+            "dkms remove yeetmouse-driver/0.9.5+dirscale1 --all",
+            "dkms install yeetmouse-driver/0.9.5"])
+
+    def test_dismissed_authorization_is_not_reported_as_a_broken_system(self) -> None:
+        dialog = self.make()
+        dialog._launcher = lambda action, dry_run=False, text=None: driver_setup.Launch(
+            ["/bin/sh", "-c", "exit 126"], "", "stand-in for a dismissed pkexec prompt")
+        dialog.install_button.click()
+        self.wait(dialog)
+        self.assertIn("not authorized or dismissed. Nothing was changed.",
+                      dialog.result.text())
+
+    def test_controls_are_named_and_mnemonics_unique(self) -> None:
+        dialog = self.make()
+        seen: dict[str, str] = {}
+        texts = [dialog.tabs.tabText(i) for i in range(dialog.tabs.count())]
+        texts += [w.text() for w in dialog.findChildren(QtWidgets.QAbstractButton)
+                  if not w.objectName().startswith("qt_") and w.parent() is dialog]
+        for text in texts:
+            key = _mnemonic(text)
+            self.assertTrue(key, text)
+            self.assertNotIn(key, seen, f"{text!r} and {seen.get(key)!r} share Alt+{key}")
+            seen[key] = text
+        for widget in (dialog.install_button, dialog.revert_button, dialog.recheck_button,
+                       dialog.close_button, dialog.dry_check, dialog.script_view,
+                       dialog.output_view):
+            self.assertTrue(widget.accessibleDescription(), repr(widget))
+        texts = [dialog.windowTitle(), dialog.state_label.text(), dialog.checks_label.text(),
+                 dialog.install_changes.text(), dialog.revert_changes.text(),
+                 dialog.confirmation_text("install"), dialog.confirmation_text("revert")]
+        self.assertEqual([text for text in texts if BRANDS.search(text)], [])
+
+
+class DriverSetupInMainWindowTest(MainWindowTest):
+    """How the main window leads to the driver setup. Runs only the tests named here."""
+
+    def test_help_menu_opens_the_setup_and_refreshes_afterwards(self) -> None:
+        from tests.test_driver_setup import FakeSystem
+        fake = FakeSystem(self)
+        shutil.rmtree(self.params.parent)          # the module is not loaded
+        window = self.make_window()
+        self.assertEqual(window.driver_setup_action.text(), "&Driver setup…")
+        window.make_setup_dialog = lambda: DriverSetupDialog(
+            window, fake.probe(), confirm=lambda *_: False)
+        self.assertIn("not loaded", window.driver_panel.status_label.text())
+        window.driver_setup_action.trigger()
+        dialog = window.setup_dialog
+        assert dialog is not None
+        self.assertTrue(dialog.isVisible())
+        self.assertIn("no yeetmouse driver is installed", dialog.state_label.text())
+        # Meanwhile the module appears (as after an install); closing looks again.
+        self.params.mkdir(parents=True)
+        for name in (*PARAM_NAMES, "update"):
+            (self.params / name).write_text("1.000000\n" if name != "update" else "0\n")
+        dialog.changed.emit()
+        self.assertIn("values read from the driver", window.driver_panel.status_label.text())
+        dialog.close()
+        _app.processEvents()
+        self.assertIsNone(window.setup_dialog)
+
+    def test_stepper_button_leads_to_the_setup(self) -> None:
+        from tests.test_driver_setup import FakeSystem
+        fake = FakeSystem(self)
+        shutil.rmtree(self.params.parent)
+        window = self.make_window()
+        window.make_setup_dialog = lambda: DriverSetupDialog(
+            window, fake.probe(), confirm=lambda *_: False)
+        window.mouse_panel._factory = lambda pid, on_log: FakeSession(pid)
+        window.run_step(Step.START)
+        self.assertEqual(window.steps_bar.next_button.text(), "Driver setup…")
+        window.steps_bar.next_button.click()
+        self.assertIsNotNone(window.setup_dialog)
+        window.setup_dialog.close()
+
+
+def load_tests(loader: unittest.TestLoader, _tests: unittest.TestSuite,
+               _pattern: str | None) -> unittest.TestSuite:
+    """Do not run the whole MainWindowTest a second time through its subclass."""
+    suite = unittest.TestSuite()
+    suite.addTests(loader.loadTestsFromTestCase(MainWindowTest))
+    suite.addTests(loader.loadTestsFromTestCase(DriverSetupDialogTest))
+    own = [name for name in vars(DriverSetupInMainWindowTest) if name.startswith("test_")]
+    suite.addTests(DriverSetupInMainWindowTest(name) for name in own)
+    return suite
 
 
 if __name__ == "__main__":

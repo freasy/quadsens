@@ -94,7 +94,7 @@ class HintTest(unittest.TestCase):
         self.assertIn("values read from the driver", ok)
         not_loaded = hints.driver_status(DriverState(DriverStatus.NOT_LOADED))
         self.assertIn("module not loaded", not_loaded)
-        self.assertIn("forked yeetmouse module", not_loaded)
+        self.assertIn("Help > Driver setup", not_loaded)
         unsupported = hints.driver_status(DriverState(DriverStatus.UNSUPPORTED))
         self.assertIn("no DirScale parameters", unsupported)
         unreadable = hints.driver_status(DriverState(DriverStatus.NOT_READABLE))

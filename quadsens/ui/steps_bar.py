@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from ..steps import ALL_DONE, SHORT_TITLES, Status, Step, StepInfo, current_step
+from ..steps import (
+    ALL_DONE,
+    FIX_ACTIONS,
+    SHORT_TITLES,
+    Status,
+    Step,
+    StepInfo,
+    current_step,
+)
 from . import theme
 from .qt import QtCore, QtGui, QtWidgets, Signal
 from .status import SPACE_M, SPACE_S, WrapLabel
@@ -133,6 +141,7 @@ class StepsBar(QtWidgets.QWidget):
     """
 
     action_requested = Signal(object)  # Step
+    fix_requested = Signal(str)        # what would unblock the current step
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -192,10 +201,18 @@ class StepsBar(QtWidgets.QWidget):
             text = f"Step {current.number} of {len(infos)}: {current.blocked or current.detail}"
             self.next_label.setText(text)
             action = current.action
-            self.next_button.setText(action or "Waiting for the result")
-            self.next_button.setEnabled(bool(action) and not current.blocked)
-            self.next_button.setAccessibleName(
-                f"Next step: {action}" if action else "Next step: waiting for the result")
+            if current.blocked and current.fix in FIX_ACTIONS:
+                # The step cannot work yet, but there is a place that fixes it.
+                self.next_button.setText(FIX_ACTIONS[current.fix])
+                self.next_button.setEnabled(True)
+                self.next_button.setAccessibleName(
+                    "Before the next step: open the driver setup")
+            else:
+                self.next_button.setText(action or "Waiting for the result")
+                self.next_button.setEnabled(bool(action) and not current.blocked)
+                self.next_button.setAccessibleName(
+                    f"Next step: {action}" if action
+                    else "Next step: waiting for the result")
         self.next_button.setShortcut(QtGui.QKeySequence("Ctrl+Return"))
         self.next_button.setToolTip(
             "Carries out the current step (Ctrl+Return). The buttons below do the same "
@@ -203,5 +220,9 @@ class StepsBar(QtWidgets.QWidget):
         self.next_button.setAccessibleDescription(self.next_label.text())
 
     def _clicked(self) -> None:
+        current = self._current
+        if current is not None and current.blocked and current.fix in FIX_ACTIONS:
+            self.fix_requested.emit(current.fix)
+            return
         if self._current is not None and self._current.action:
             self.action_requested.emit(self._current.step)
