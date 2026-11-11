@@ -478,9 +478,22 @@ class Server:
         self.device = device
         self.log = log
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.socket.bind((host, port))
-        self.socket.listen(1)
+        try:
+            # The port must be ours alone. On POSIX SO_REUSEADDR only allows
+            # binding again right after a stop (connections in TIME_WAIT); a
+            # second listener is still refused. On Windows the same option
+            # would let two programs listen on one port, so there the
+            # exclusive option is set instead.
+            exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+            if exclusive is not None:
+                self.socket.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+            else:
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.socket.bind((host, port))
+            self.socket.listen(1)
+        except OSError:
+            self.socket.close()
+            raise
         self.socket.settimeout(0.5)
         self.address = self.socket.getsockname()
         self.stopping = threading.Event()
@@ -566,7 +579,7 @@ class Server:
 class Client:
     """Talks USB/IP to the server over a socket, the way a host driver would."""
 
-    def __init__(self, host: str, port: int, timeout: float = 5.0) -> None:
+    def __init__(self, host: str, port: int, timeout: float = 30.0) -> None:
         self.socket = socket.create_connection((host, port), timeout=timeout)
         self.seqnum = 0
 
@@ -691,8 +704,31 @@ def format_event(entry: dict[str, Any]) -> str:
     return "%s hid     %s" % (stamp, emulator.format_entry(entry).split(" ", 1)[1])
 
 
+PORT_UNAVAILABLE, START_FAILED = "port unavailable", "start failed"
+# What bind() reports when the port cannot be had. Windows has two codes: 10048
+# (WSAEADDRINUSE) and 10013 (WSAEACCES), the latter when another socket holds
+# the port exclusively or the port lies in a range Windows has reserved.
+_PORT_ERRNOS = {errno.EADDRINUSE, errno.EACCES, 10048, 10013}
+
+
+def port_unavailable(exc: OSError) -> bool:
+    """Whether a failed bind() means: this port cannot be had right now."""
+    return (exc.errno in _PORT_ERRNOS
+            or getattr(exc, "winerror", None) in (10048, 10013))
+
+
 class ServerError(Exception):
-    """The server could not be started; the message says why."""
+    """The server could not be started; the message says why.
+
+    ``kind`` is PORT_UNAVAILABLE or START_FAILED and does not depend on the
+    wording or on the language of the operating system; ``detail`` is the
+    text of the operating system.
+    """
+
+    def __init__(self, message: str, kind: str = START_FAILED, detail: str = "") -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.detail = detail
 
 
 class VirtualMouseServer:
@@ -741,13 +777,16 @@ class VirtualMouseServer:
                                state_path=self.state_path)
             server = Server(device, self._log, self.HOST, self.port)
         except OSError as exc:
-            if exc.errno in (errno.EADDRINUSE, 10048):   # 10048: the Windows code for it
+            detail = str(exc.strerror or exc)
+            if port_unavailable(exc):
                 raise ServerError(
-                    "Port %d on this PC is in use by another program, probably another "
-                    "USB/IP server (or a second QuadSens). Close it and try again."
-                    % self.port) from exc
-            raise ServerError("The virtual mouse could not be started (%s)."
-                              % (exc.strerror or exc)) from exc
+                    "Port %d on %s is not available. Another program is using it (another "
+                    "QuadSens, or a USB/IP server such as usbipd), or Windows has reserved "
+                    "it. Close that program and start the virtual mouse again; if nothing "
+                    "is using the port, restart the PC. (The system said: %s)"
+                    % (self.port, self.HOST, detail), PORT_UNAVAILABLE, detail) from exc
+            raise ServerError("The virtual mouse could not be started (%s)." % detail,
+                              START_FAILED, detail) from exc
         self.port = server.address[1]
         self._server = server
         self._thread = threading.Thread(target=server.serve_forever, name="usbip-server",

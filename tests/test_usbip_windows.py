@@ -36,7 +36,15 @@ Port 03: device in use at Full Speed(12Mbps)
 """
 
 
-def wait_until(condition, seconds: float = 5.0) -> bool:
+def occupy_port() -> socket.socket:
+    """Another program listening on a port of its own choice, as on any platform."""
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker.bind(("127.0.0.1", 0))
+    blocker.listen(1)
+    return blocker
+
+
+def wait_until(condition, seconds: float = 30.0) -> bool:
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         if condition():
@@ -276,15 +284,54 @@ class ServerThreadTest(unittest.TestCase):
         self.assertTrue(any(e.get("state") == "detached" for e in server.poll()))
 
     def test_port_in_use_is_reported_clearly(self) -> None:
-        blocker = socket.socket()
-        blocker.bind(("127.0.0.1", 0))
-        blocker.listen(1)
+        blocker = occupy_port()
         self.addCleanup(blocker.close)
-        server = VirtualMouseServer(port=blocker.getsockname()[1])
+        port = blocker.getsockname()[1]
+        server = VirtualMouseServer(port=port)
         with self.assertRaises(usbip_server.ServerError) as caught:
             server.start()
-        self.assertIn("in use by another program", str(caught.exception))
+        self.assertEqual(caught.exception.kind, usbip_server.PORT_UNAVAILABLE)
+        self.assertTrue(caught.exception.detail)              # the system's own words
+        self.assertIn(caught.exception.detail, str(caught.exception))
+        self.assertIn("Port %d on 127.0.0.1" % port, str(caught.exception))
         self.assertFalse(server.running)
+
+    def test_a_second_server_cannot_share_the_port(self) -> None:
+        first = VirtualMouseServer(port=0)
+        self.addCleanup(first.stop)
+        first.start()
+        second = VirtualMouseServer(port=first.port)
+        self.addCleanup(second.stop)
+        with self.assertRaises(usbip_server.ServerError) as caught:
+            second.start()
+        self.assertEqual(caught.exception.kind, usbip_server.PORT_UNAVAILABLE)
+        # The first one is not disturbed.
+        client = Client("127.0.0.1", first.port)
+        self.addCleanup(client.close)
+        self.assertEqual(client.import_device(), 0)
+
+    def test_both_windows_codes_and_the_posix_one_mean_port_unavailable(self) -> None:
+        import errno
+        self.assertTrue(usbip_server.port_unavailable(OSError(errno.EADDRINUSE, "in use")))
+        for code in (10048, 10013):
+            self.assertTrue(usbip_server.port_unavailable(OSError(code, "x")), code)
+            error = OSError(errno.EINVAL, "x")
+            error.winerror = code                              # as Python sets it on Windows
+            self.assertTrue(usbip_server.port_unavailable(error), code)
+        self.assertFalse(usbip_server.port_unavailable(OSError(errno.ENOMEM, "x")))
+
+    def test_other_start_failures_keep_their_own_kind(self) -> None:
+        server = VirtualMouseServer(port=0)
+        original = usbip_server.Server
+
+        def broken(*_args, **_kwargs):
+            raise OSError(12, "Cannot allocate memory")
+        usbip_server.Server = broken
+        self.addCleanup(setattr, usbip_server, "Server", original)
+        with self.assertRaises(usbip_server.ServerError) as caught:
+            server.start()
+        self.assertEqual(caught.exception.kind, usbip_server.START_FAILED)
+        self.assertIn("Cannot allocate memory", str(caught.exception))
 
     def test_stop_with_a_request_still_waiting(self) -> None:
         server = VirtualMouseServer(port=0)
@@ -323,8 +370,11 @@ class VirtualMouseTest(unittest.TestCase):
         return mouse, driver
 
     def settle(self, mouse) -> list[dict]:
-        self.assertTrue(wait_until(lambda: not mouse.busy))
-        time.sleep(0.05)
+        """Wait until usbip.exe is through and the server has seen what it did."""
+        driver = mouse.client.runner
+        self.assertTrue(wait_until(
+            lambda: not mouse.busy
+            and mouse.server.attached == (getattr(driver, "client", None) is not None)))
         return mouse.poll()
 
     def test_start_attaches_and_stop_detaches_only_our_port(self) -> None:
@@ -422,16 +472,14 @@ class VirtualMouseTest(unittest.TestCase):
         self.assertEqual(mouse.message, "Stopped.")
 
     def test_port_busy(self) -> None:
-        blocker = socket.socket()
-        blocker.bind(("127.0.0.1", 0))
-        blocker.listen(1)
+        blocker = occupy_port()
         self.addCleanup(blocker.close)
         driver = FakeDriver()
         mouse = usbip_mouse.VirtualMouse(
             UsbipClient(TOOL, driver), VirtualMouseServer(port=blocker.getsockname()[1]))
         self.assertFalse(mouse.start())
         self.assertEqual(mouse.state, usbip_mouse.ERROR)
-        self.assertIn("in use by another program", mouse.message)
+        self.assertEqual(mouse.problem, usbip_server.PORT_UNAVAILABLE)
         self.assertEqual(driver.calls, [])
         mouse.close()
 

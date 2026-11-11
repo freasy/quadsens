@@ -109,7 +109,7 @@ class VirtualMouse:
             self.server.start()
         except ServerError as exc:
             self.failed = True
-            self._note(str(exc), "server")
+            self._note(str(exc), exc.kind)
             return False
         self.client.tcp_port = self.server.port
         self.started_at = time.time()

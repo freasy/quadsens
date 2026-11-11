@@ -433,8 +433,10 @@ serving and the device disappears on the Windows side.
   what `usbip.exe` said. Try the fallback above.
 - *"Windows refused the attach" / access denied.* Run the command from the
   message in a console opened as administrator, or use the USBip app.
-- *"Port 3240 on this PC is in use by another program".* Another USB/IP
-  server (or a second QuadSens) holds the port. Close it and start again.
+- *"Port 3240 on 127.0.0.1 is not available".* Another program holds the
+  port (a second QuadSens, or a USB/IP server such as usbipd), or Windows
+  has reserved it. Close that program and start again; if nothing is using
+  the port, restart the PC.
 - *The device is still there after a crash.* In a console: `usbip port`
   lists the attached devices; find the one with
   `usbip://127.0.0.1:3240/1-1` and remove it with `usbip detach -p <port>`.
