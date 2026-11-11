@@ -103,10 +103,50 @@ def load_latest(pattern: str = DEFAULT_GLOB) -> Calibration | None:
 def driver_scalars(firmware: Scalars, flip_y: bool = False) -> Scalars:
     """Map calibration scalars to the driver's DirScale parameters.
 
-    X maps directly. The driver's +Y is "down"; whether the calibration's YPos
-    means down as well is not confirmed, hence ``flip_y`` exchanges the two.
+    X maps directly, and so does Y: the calibration reduces its eight measured
+    directions to four with a 1-2-1 weighted average (the cardinal direction
+    counts twice, its two diagonal neighbours once), and real result files
+    show YNeg to be the average of the upward (N) side and YPos that of the
+    downward (S) side. The driver's +Y is "down" as well. ``flip_y`` exchanges
+    the two anyway, for setups where up and down feel swapped.
     """
     return firmware.flipped_y() if flip_y else firmware
+
+
+SOURCE_FILE = "the result file"
+SOURCE_MOUSE = "the values sent to the virtual mouse"
+
+
+@dataclass(frozen=True)
+class Result:
+    """The four calibrated multipliers to work with, and where they came from."""
+
+    scalars: Scalars
+    source: str
+    time: float  # unix time the result was written
+
+
+def pick_result(calibration: Calibration | None, written: Scalars | None = None,
+                written_time: float | None = None) -> Result | None:
+    """Choose between the result file and the values a client wrote to the mouse.
+
+    The newer of the two wins; values outside the allowed range are not a result.
+    """
+    candidates: list[Result] = []
+    if calibration is not None:
+        candidates.append(Result(calibration.firmware, SOURCE_FILE, calibration.mtime))
+    if written is not None and written_time is not None:
+        candidates.append(Result(written, SOURCE_MOUSE, written_time))
+    usable = []
+    for candidate in candidates:
+        try:
+            candidate.scalars.validate()
+        except ValueError:
+            continue
+        usable.append(candidate)
+    if not usable:
+        return None
+    return max(usable, key=lambda result: result.time)
 
 
 def _fixed_prefix(pattern: str) -> str:

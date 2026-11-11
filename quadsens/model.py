@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from decimal import ROUND_HALF_UP, Decimal
 from dataclasses import dataclass
 
 SCALE_MIN = 0.1
@@ -60,3 +61,16 @@ class Scalars:
 
     def is_close(self, other: Scalars, tolerance: float = 1e-4) -> bool:
         return all(abs(a - b) <= tolerance for a, b in zip(self.as_tuple(), other.as_tuple()))
+
+
+def format_deviation(value: float) -> str:
+    """Deviation of a multiplier from 1.0 in percent, e.g. "+3.8 %" or "-1.5 %".
+
+    Rounded half away from zero on the decimal digits, so that 1.0375 and
+    0.9625 give the same amount with opposite signs.
+    """
+    percent = ((Decimal(repr(float(value))) - 1) * 100).quantize(
+        Decimal("0.1"), rounding=ROUND_HALF_UP)
+    if percent == 0:
+        return "0.0 %"
+    return f"{percent:+.1f} %"

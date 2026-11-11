@@ -665,6 +665,42 @@ def format_entry(entry: LogEntry) -> str:
         stamp, node, entry["cmd"], fields, entry.get("raw", entry.get("request", "")))
 
 
+_EVENT_SUMMARIES = {
+    "created": "virtual mouse created",
+    "destroyed": "virtual mouse removed",
+    "OPEN": "opened by a client",
+    "CLOSE": "closed by the client",
+    "warning": "warning",
+}
+
+
+def summarize_entry(entry: LogEntry) -> str | None:
+    """One short line for an entry worth telling the user about, else None.
+
+    The log is mostly protocol chatter. What matters to the user is whether a
+    client found the device and whether calibration values arrived.
+    """
+    stamp = time.strftime("%H:%M:%S", time.localtime(entry.get("t", time.time())))
+    if "highlight" in entry:
+        prop_id, value = entry.get("id"), entry.get("value")
+        names = {P_DIR_SENS_X_POS: "XPos", P_DIR_SENS_X_NEG: "XNeg",
+                 P_DIR_SENS_Y_POS: "YPos", P_DIR_SENS_Y_NEG: "YNeg"}
+        if prop_id in names and isinstance(value, int):
+            return "%s calibration value received: %s = %.4f" % (
+                stamp, names[prop_id], bits_to_float(value))
+        if prop_id == P_DIR_SENS_ENABLED:
+            return "%s directional sensitivity switched %s by the client" % (
+                stamp, "on" if value else "off")
+        return f"{stamp} calibration value received"
+    event = entry.get("event")
+    if event in _EVENT_SUMMARIES:
+        text = _EVENT_SUMMARIES[event]
+        if event == "warning" and entry.get("message"):
+            text = f"warning: {entry['message']}"
+        return f"{stamp} {text}"
+    return None
+
+
 @dataclass
 class DirectionalWrites:
     """The directional sensitivity values a client wrote during this session."""
