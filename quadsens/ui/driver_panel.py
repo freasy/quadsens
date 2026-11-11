@@ -43,6 +43,8 @@ CHANGED_MARK = "≠"
 class DriverPanel(Card):
     # Something the step display depends on changed: values, driver or save state.
     changed = Signal()
+    # The driver was read again (start, Read again, after Apply and Save).
+    driver_read = Signal()
     # A set of values reached the driver.
     applied = Signal(object)  # Scalars
     flip_changed = Signal(bool)
@@ -279,14 +281,22 @@ class DriverPanel(Card):
         """Why nothing can be written to the driver right now, or ""."""
         status = self.state.status
         if status is DriverStatus.NOT_LOADED:
-            return "The yeetmouse module is not loaded (Help > Driver setup)."
+            return "The yeetmouse module is not loaded (see the driver check)."
         if status is DriverStatus.UNSUPPORTED:
-            return "The loaded yeetmouse module is not the fork (Help > Driver setup)."
+            return "The loaded yeetmouse module is not the fork (see the driver check)."
         if status is DriverStatus.NOT_READABLE and not self._driver.helper_installed():
             return "The driver is not writable for you (Help > Setup help)."
         return ""
 
     # ---- actions ----------------------------------------------------------
+
+    def readable(self) -> bool | None:
+        """True if the driver values were read, False if reading was refused."""
+        if self.state.status is DriverStatus.OK:
+            return True
+        if self.state.status is DriverStatus.NOT_READABLE:
+            return False
+        return None
 
     def fork_missing(self) -> bool:
         """True when the forked module is not loaded: the driver setup can fix that."""
@@ -308,6 +318,7 @@ class DriverPanel(Card):
         self.save_state = self._saver.state(self.driver_values())
         self._update_pending()
         self.changed.emit()
+        self.driver_read.emit()
         return state
 
     def _values_edited(self, *_args: object) -> None:

@@ -8,6 +8,7 @@ from collections.abc import Callable
 
 from .. import about
 from ..calibration import result_folder
+from .. import driver_setup
 from ..diagram import DEFAULT_ZOOM, ZOOMS, number, zoom_of
 from ..driver import Driver
 from ..emulator import (
@@ -30,6 +31,7 @@ from ..persist import Saver
 from ..steps import FlowState, Status, Step, StepInfo, derive, is_unity
 from .calibration_panel import CalibrationPanel
 from .driver_panel import SAME_VALUE, DriverPanel
+from .driver_strip import DriverCheckStrip
 from .icon import app_icon
 from .mouse_panel import MousePanel
 from .qt import QtCore, QtGui, QtWidgets
@@ -54,7 +56,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, settings: QtCore.QSettings, calibration_glob: str, driver: Driver,
                  emulator_state_path: str | None = None,
                  parent: QtWidgets.QWidget | None = None,
-                 uhid_path: str = UHID_PATH, saver: Saver | None = None) -> None:
+                 uhid_path: str = UHID_PATH, saver: Saver | None = None,
+                 setup_probe: driver_setup.Probe | None = None) -> None:
         super().__init__(parent)
         self._settings = settings
         self._calibration_glob = calibration_glob
@@ -67,7 +70,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setup_dialog: DriverSetupDialog | None = None
         # Replaceable, so that tests describe another machine than this one.
         self.make_setup_dialog: Callable[[], DriverSetupDialog] = (
-            lambda: DriverSetupDialog(self))
+            lambda: DriverSetupDialog(self, setup_probe))
         # Replaceable, so that tests do not start a file manager.
         self.open_url: Callable[[QtCore.QUrl], object] = QtGui.QDesktopServices.openUrl
         self.setWindowTitle(about.APP_NAME)
@@ -80,6 +83,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return EmulatorSession(product_id=pid, state_path=emulator_state_path,
                                    on_log=on_log, uhid_path=uhid_path)
 
+        self.driver_strip = DriverCheckStrip(setup_probe)
         self.steps_bar = StepsBar()
         self.mouse_panel = MousePanel(make_session, lambda: uhid_access(uhid_path), settings)
         self.calibration_panel = CalibrationPanel(calibration_glob, settings)
@@ -94,8 +98,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         central = QtWidgets.QWidget()
         self._layout = layout = QtWidgets.QVBoxLayout(central)
-        layout.setContentsMargins(SPACE_L, SPACE_M, SPACE_L, SPACE_M)
-        layout.setSpacing(SPACE_M)
+        layout.setContentsMargins(SPACE_L, SPACE_M - 2, SPACE_L, SPACE_M - 2)
+        layout.setSpacing(SPACE_M - 2)
+        layout.addWidget(self.driver_strip)
         layout.addWidget(self.steps_bar)
         layout.addWidget(self.mouse_panel)
         layout.addLayout(self._lower)
@@ -112,10 +117,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.driver_panel.applied.connect(self._driver_applied)
         self.driver_panel.flip_changed.connect(self.calibration_panel.set_flip_y)
         self.steps_bar.action_requested.connect(self.run_step)
-        self.steps_bar.fix_requested.connect(lambda _fix: self.show_driver_setup())
+        self.driver_strip.action_requested.connect(self.show_driver_setup)
+        self.driver_strip.checked.connect(self._driver_checked)
+        self.driver_panel.driver_read.connect(self.check_driver)
+        self.steps_bar.fix_requested.connect(
+            lambda _fix: self.show_driver_setup(driver_setup.ACT_FIX))
 
         # Keyboard order follows the workflow: next step, mouse, result, driver.
         order: list[QtWidgets.QWidget] = [
+            self.driver_strip.action_button, self.driver_strip.details_button,
+            self.driver_strip.recheck_button,
             self.steps_bar.next_button,
             self.mouse_panel.toggle_button, self.mouse_panel.pid_combo,
             self.mouse_panel.log_toggle, self.mouse_panel.log_view,
@@ -137,6 +148,7 @@ class MainWindow(QtWidgets.QMainWindow):
             int(settings.value("emulator/pid", DEFAULT_PRODUCT_ID, type=int)))
         self._share_space(self.mouse_panel.log_shown())
         self.update_steps()
+        self.check_driver()
         self.resize(*DEFAULT_SIZE)
         geometry = settings.value("window/geometry")
         if isinstance(geometry, QtCore.QByteArray) and not geometry.isEmpty():
@@ -214,7 +226,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.driver_setup_action = QtGui.QAction("&Driver setup…", self)
         self.driver_setup_action.setToolTip(
             "See which yeetmouse driver is installed, and install or revert the fork")
-        self.driver_setup_action.triggered.connect(self.show_driver_setup)
+        self.driver_setup_action.triggered.connect(lambda: self.show_driver_setup())
         help_menu.addAction(self.driver_setup_action)
         help_menu.addSeparator()
         self.about_action = QtGui.QAction("&About %s" % about.APP_NAME, self)
@@ -267,7 +279,15 @@ class MainWindow(QtWidgets.QMainWindow):
                        "shows which driver is installed and can install the fork. The "
                        "README section \"One-time setup\" has the details.</p>" % body)
 
-    def show_driver_setup(self) -> None:
+    def check_driver(self) -> None:
+        """Run the driver check: on start, after reading the driver, after the setup."""
+        self.driver_strip.set_readable(self.driver_panel.readable())
+        self.driver_strip.check()
+
+    def _driver_checked(self) -> None:
+        self.steps_bar.set_waiting_for_driver(self.driver_strip.blocks_steps())
+
+    def show_driver_setup(self, focus: str = "") -> None:
         """Open the driver setup; it never starts anything by itself."""
         if self.setup_dialog is None:
             dialog = self.make_setup_dialog()
@@ -278,6 +298,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setup_dialog.show()
         self.setup_dialog.raise_()
         self.setup_dialog.activateWindow()
+        self.setup_dialog.focus_on(focus)
 
     def _driver_setup_changed(self) -> None:
         """An install or revert ran: the driver panel may see another module now."""

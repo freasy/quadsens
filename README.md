@@ -114,8 +114,15 @@ your `PATH`.
 
 ## Installing the driver from QuadSens
 
-*Help > Driver setup* shows which yeetmouse driver is installed, checks what
-an install needs, and can install the fork or put the previous driver back.
+The first line of the main window is the driver check. When everything is in
+place it reads "Driver check passed". Otherwise it names the problem in plain
+words and, where QuadSens can help, shows a *Fix driver setup…* button:
+
+![Driver check that offers the fix](docs/screenshot-driver-check.png)
+
+The button, the *Details* link next to it and *Help > Driver setup* all open
+the same dialog. It shows which yeetmouse driver is installed, checks what an
+install needs, and can install the fork or put the previous driver back.
 Nothing runs by itself: each action has its own button, has to be confirmed,
 and asks for your password once through `pkexec`.
 
@@ -256,7 +263,7 @@ the *Product ID* box, use the same value here.
 
 ## Usage
 
-The row on top of the window shows six steps. A done step has a check mark,
+Below the driver check, a row shows six steps. A done step has a check mark,
 the current one a filled circle and a bold title, pending ones are muted. The
 filled button on the right always carries out the current step (Ctrl+Return);
 the button that does the same inside a card is filled as well. The steps are worked out from what QuadSens finds,
@@ -371,9 +378,10 @@ The udev rule is missing or you are not in group `input` in the current
 session. See [One-time setup](#one-time-setup) and log in again. If
 `/dev/uhid` does not exist at all, load the module with `sudo modprobe uhid`.
 
-**The driver panel says "not readable".**
-Your session is not in group `yeetmouse`. Join the group and log out and in
-again; `id -nG` must list it.
+**The driver check says "Log out and in again" or "not readable".**
+Your session is not in group `yeetmouse` yet. Log out and in again; `id -nG`
+must list the group. If you are not a member at all, the driver check offers
+*Fix driver setup…*, which adds you.
 
 **It worked, then it says "not readable" again after reloading the module.**
 The parameter files are created as `root:root` every time the module is
@@ -383,11 +391,11 @@ loaded. `yeetmouse.service` sets the group, so run it again:
 sudo systemctl restart yeetmouse.service
 ```
 
-**The driver panel says "module not loaded" or "no DirScale parameters".**
-*Help > Driver setup* shows what is installed. If the fork is installed, load
-the module (`sudo modprobe yeetmouse`). If the parameters are missing, the
-loaded module is the unmodified yeetmouse; install the fork from that dialog
-or by hand.
+**The driver check does not pass.**
+The line on top of the window says why and what to do: install the fork
+(*Fix driver setup…*), load the module (`sudo modprobe yeetmouse`), log out and
+in again after you were added to group `yeetmouse`, or install what the
+installer needs. *Check again* looks once more.
 
 **Driver setup stops with "belongs to the package ...".**
 Your yeetmouse driver was installed by the package manager. Remove that

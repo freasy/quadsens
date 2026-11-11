@@ -51,7 +51,7 @@ class Card(QtWidgets.QFrame):
 
     def card_layout(self) -> QtWidgets.QVBoxLayout:
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(SPACE_L, SPACE_M, SPACE_L, SPACE_M)
+        layout.setContentsMargins(SPACE_L, SPACE_M - 2, SPACE_L, SPACE_M - 2)
         layout.setSpacing(SPACE_S)
         return layout
 

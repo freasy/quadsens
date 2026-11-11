@@ -81,6 +81,41 @@ class FakeSession:
         pass
 
 
+def machine_probe(root: Path, driver: str = "fork", tools: bool = True,
+                  in_session: bool = True, loaded: bool = True) -> driver_setup.Probe:
+    """A made-up machine for the driver check, answered from memory (no subprocess)."""
+    kernel = "6.12.0-test"
+    for folder in ("usr/bin", "usr/lib/systemd/system", "run/systemd/system",
+                   f"lib/modules/{kernel}/build"):
+        (root / folder).mkdir(parents=True, exist_ok=True)
+    status = ""
+    if driver == "fork":
+        status = f"yeetmouse-driver/0.9.5+dirscale1, {kernel}, x86_64: installed\n"
+        (root / "usr/bin/yeetmousectl").write_text("tool dirScaleXPos")
+        (root / "usr/lib/systemd/system/yeetmouse.service").write_text("unit")
+        if loaded:
+            params = root / "sys/module/yeetmouse/parameters"
+            params.mkdir(parents=True, exist_ok=True)
+            (params / "DirScaleXPos").write_text("1")
+    elif driver == "stock":
+        status = f"yeetmouse-driver/0.9.5, {kernel}, x86_64: installed\n"
+
+    def run(argv: list[str]) -> tuple[int, str]:
+        if argv[1:2] == ["status"]:
+            return 0, status
+        if argv[1:3] == ["group", "yeetmouse"] and driver == "fork":
+            return 0, "yeetmouse:x:931:tester\n"
+        return 1, ""
+
+    present = ("dkms", "git", "make", "cc", "c++", "bash", "pkexec", "getent")
+    if not tools:
+        present = ("dkms", "getent", "pkexec", "bash")
+    return driver_setup.Probe(
+        root=root, run=run, kernel=kernel,
+        which=lambda name: f"/usr/bin/{name}" if name in present else None,
+        session_groups=lambda: {931} if in_session else {1000}, user=lambda: "tester")
+
+
 def _mnemonic(text: str) -> str:
     match = re.search(r"&([^&])", text.replace("&&", ""))
     return match.group(1).lower() if match else ""
@@ -105,6 +140,8 @@ class MainWindowTest(unittest.TestCase):
         self.config = self.tmp / "yeetmouse.conf"  # stands in for /etc/yeetmouse.conf
         self.config.write_text("sens=1\n", encoding="ascii")
         self.saver = Saver(self.config, tool=FAKE_TOOL)
+        # The machine the driver check sees: the fork, installed and loaded.
+        self.probe = machine_probe(self.tmp / "machine")
         patcher = mock.patch.dict(os.environ, {"QUADSENS_FAKE_PARAMS": str(self.params),
                                                "QUADSENS_FAKE_MODE": "fork"})
         patcher.start()
@@ -123,8 +160,9 @@ class MainWindowTest(unittest.TestCase):
                                     QtCore.QSettings.Format.IniFormat)
         window = MainWindow(settings, self.pattern, Driver(self.params),
                             str(self.tmp / "state.json"), uhid_path=str(self.uhid),
-                            saver=self.saver)
+                            saver=self.saver, setup_probe=self.probe)
         self.windows.append(window)
+        window.driver_strip.wait()
         return window
 
     def spin_values(self, window: MainWindow) -> list[float]:
@@ -415,8 +453,8 @@ class MainWindowTest(unittest.TestCase):
         (self.params / "DirScaleYNeg").unlink()
         drv.read_button.click()
         self.assertFalse(drv.status_label.isHidden())
-        self.assertIn("no DirScale parameters", drv.status_label.text())
-        self.assertIn("Help > Driver setup", drv.status_label.text())
+        self.assertIn("not the fork's module", drv.status_label.text())
+        self.assertIn("driver check above", drv.status_label.text())
         self.assertTrue(drv.pending_label.isHidden())  # the problem takes its place
         self.assertTrue(drv.saved_label.isHidden())
         self.assertTrue(drv.apply_button.isEnabled())
@@ -426,7 +464,7 @@ class MainWindowTest(unittest.TestCase):
 
         shutil.rmtree(self.params.parent)
         drv.read_button.click()
-        self.assertIn("Install or load the fork", drv.status_label.text())
+        self.assertIn("module not loaded", drv.status_label.text())
         window.setup_action.trigger()
         box = window.info_box
         assert box is not None
@@ -440,9 +478,13 @@ class MainWindowTest(unittest.TestCase):
         window = self.make_window()
         text = window.driver_panel.status_label.text()
         self.assertIn("not readable", text)
-        self.assertIn("Join group yeetmouse", text)
-        self.assertIn("log in again", text)
+        self.assertIn("driver check above", text)
         self.assertFalse(window.driver_panel.status_label.isHidden())
+        # The check on top explains it once, with what to do.
+        self.assertEqual(window.driver_strip.strip.kind, driver_setup.ATTENTION)
+        self.assertIn("not readable", window.driver_strip.headline.text())
+        self.assertIn("systemctl restart yeetmouse.service",
+                      window.driver_strip.detail.text())
         long_form = " ".join(window.setup_problems())
         self.assertIn("sudo usermod -aG yeetmouse $USER", long_form)
         self.assertIn("systemctl restart yeetmouse.service", long_form)
@@ -803,7 +845,7 @@ class MainWindowTest(unittest.TestCase):
         self.assertEqual(button.shortcut().toString(), "Ctrl+Return")
         self.assertEqual(button.accessibleName(), "Next step: Start virtual mouse")
         self.assertTrue(button.font().bold())
-        self.assertIs(window.tab_order[0], button)
+        self.assertIn(button, window.tab_order[:4])
 
     # ---- save to config -----------------------------------------------------
 
@@ -1344,6 +1386,149 @@ class MainWindowTest(unittest.TestCase):
         for name in ("QPropertyAnimation", "QVariantAnimation", "QTimeLine", "QMovie",
                      "setGraphicsEffect"):
             self.assertNotIn(name, source)
+
+    # ---- driver check on the front ------------------------------------------------
+
+    def test_driver_check_passed_is_one_quiet_line(self) -> None:
+        window = self.make_window()
+        window.show()
+        _app.processEvents()
+        strip = window.driver_strip
+        self.assertTrue(strip.passed())
+        self.assertEqual(strip.mark.text(), "✓")
+        self.assertEqual(strip.passed_headline.text(), "Driver check passed")
+        self.assertEqual(strip.side_detail.text(),
+                         "fork 0.9.5+dirscale1, module loaded, values readable")
+        self.assertTrue(strip.accessibleName().startswith("Driver check: passed."))
+        self.assertFalse(strip.action_button.isVisible())
+        self.assertTrue(strip.details_button.isVisible())
+        self.assertTrue(strip.recheck_button.isVisible())
+        self.assertLessEqual(strip.height(), 30)          # about one line of controls
+        self.assertTrue(window.steps_bar.next_button.isVisible())
+        self.assertIs(window.centralWidget().layout().itemAt(0).widget(), strip)
+        opened: list[str] = []
+        window.show_driver_setup = lambda focus="": opened.append(focus)  # type: ignore
+        strip.action_requested.disconnect()
+        strip.action_requested.connect(lambda what: window.show_driver_setup(what))
+        strip.details_button.click()
+        self.assertEqual(opened, ["details"])
+
+    def test_driver_check_offers_the_fix_on_the_front(self) -> None:
+        self.probe = machine_probe(self.tmp / "bare", driver="none")
+        shutil.rmtree(self.params.parent)
+        window = self.make_window()
+        window.show()
+        _app.processEvents()
+        strip = window.driver_strip
+        self.assertEqual(strip.strip.kind, driver_setup.FIXABLE)
+        self.assertEqual(strip.mark.text(), "✕")
+        self.assertEqual(strip.headline.text(), "No yeetmouse driver is installed.")
+        self.assertIn("driver setup can fix this", strip.detail.text())
+        self.assertTrue(strip.action_button.isVisible())
+        self.assertEqual(strip.action_button.text(), "Fi&x driver setup…")
+        self.assertTrue(strip.action_button.property("primary"))
+        self.assertEqual(strip.property("banner"), "error")
+        self.assertIn("needs attention", strip.accessibleName())
+        # The stepper steps aside instead of explaining the same thing again.
+        self.assertFalse(window.steps_bar.next_button.isVisible())
+        self.assertIn("driver check above", window.steps_bar.next_label.text())
+        self.assertTrue(window.driver_panel.apply_button.isEnabled())   # nothing is locked
+        hint = window.minimumSizeHint()   # a failing check costs a little height
+        self.assertLessEqual((hint.width() <= 720, hint.height()), (True, 535))
+        # The button opens the setup on the install action and starts nothing.
+        strip.action_button.click()
+        dialog = window.setup_dialog
+        assert dialog is not None
+        self.assertTrue(dialog.isVisible())
+        self.assertFalse(dialog.is_busy())
+        self.assertEqual(dialog.tabs.currentIndex(), 0)
+        self.assertIn("no yeetmouse driver is installed", dialog.state_label.text())
+        dialog.close()
+
+    def test_driver_check_states_without_a_fix_button(self) -> None:
+        self.probe = machine_probe(self.tmp / "relogin", in_session=False)
+        for name in PARAM_NAMES:
+            (self.params / name).chmod(0)
+        if os.geteuid() != 0:
+            window = self.make_window()
+            window.show()
+            _app.processEvents()
+            strip = window.driver_strip
+            self.assertEqual(strip.strip.kind, driver_setup.ATTENTION)
+            self.assertEqual(strip.mark.text(), "⚠")
+            self.assertTrue(strip.headline.text().startswith("Log out and in again"))
+            self.assertFalse(strip.action_button.isVisible())
+            self.assertEqual(strip.property("banner"), "warning")
+        self.setUp()
+        self.probe = machine_probe(self.tmp / "unloaded", loaded=False)
+        window = self.make_window()
+        window.show()
+        _app.processEvents()
+        self.assertIn("installed but not loaded", window.driver_strip.headline.text())
+        self.assertIn("sudo modprobe yeetmouse", window.driver_strip.detail.text())
+        self.assertFalse(window.driver_strip.action_button.isVisible())
+
+    def test_driver_check_with_missing_prerequisites_opens_the_checklist(self) -> None:
+        self.probe = machine_probe(self.tmp / "notools", driver="stock", tools=False)
+        window = self.make_window()
+        window.show()
+        _app.processEvents()
+        strip = window.driver_strip
+        self.assertEqual(strip.strip.action, driver_setup.ACT_CHECKLIST)
+        self.assertIn("it needs: git, make, C compiler, C++ compiler", strip.detail.text())
+        self.assertEqual(strip.action_button.text(), "Show what is missing…")
+        self.assertFalse(strip.action_button.property("primary"))
+        strip.action_button.click()
+        assert window.setup_dialog is not None
+        self.assertFalse(window.setup_dialog.install_button.isEnabled())
+        window.setup_dialog.close()
+
+    def test_driver_check_runs_again_after_reading_the_driver(self) -> None:
+        window = self.make_window()
+        strip = window.driver_strip
+        self.assertTrue(strip.passed())
+        calls: list[int] = []
+        strip.checked.connect(lambda: calls.append(1))
+        # The module disappears (as after a revert without a previous driver).
+        shutil.rmtree(self.tmp / "machine" / "sys")
+        window.driver_panel.read_button.click()
+        strip.wait()
+        self.assertTrue(calls)
+        self.assertIn("not loaded", strip.headline.text())
+        (self.tmp / "machine/sys/module/yeetmouse/parameters").mkdir(parents=True)
+        (self.tmp / "machine/sys/module/yeetmouse/parameters/DirScaleXPos").write_text("1")
+        strip.recheck_button.click()
+        strip.wait()
+        self.assertTrue(strip.passed())
+        self.assertTrue(window.steps_bar.next_button.isVisibleTo(window))
+
+    def test_driver_check_does_not_block_and_survives_a_closed_window(self) -> None:
+        import threading
+        gate = threading.Event()
+        slow = machine_probe(self.tmp / "slow")
+        inner = slow.run
+
+        def run(argv: list[str]) -> tuple[int, str]:
+            gate.wait(5)
+            return inner(argv)
+
+        slow.run = run
+        settings = QtCore.QSettings(str(self.tmp / "slow.ini"),
+                                    QtCore.QSettings.Format.IniFormat)
+        window = MainWindow(settings, self.pattern, Driver(self.params), None,
+                            uhid_path=str(self.uhid), saver=self.saver, setup_probe=slow)
+        strip = window.driver_strip
+        self.assertTrue(strip.is_checking())                # constructed without waiting
+        self.assertEqual(strip.strip.kind, driver_setup.CHECKING)
+        self.assertEqual(strip.mark.text(), "…")
+        self.assertIn("Checking the driver", strip.passed_headline.text())
+        self.assertFalse(strip.recheck_button.isEnabled())
+        window.close()
+        window.deleteLater()
+        _app.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete.value)
+        gate.set()                                          # the answer comes too late
+        for _ in range(20):
+            _app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 10)
 
 
 class DriverSetupDialogTest(unittest.TestCase):

@@ -147,6 +147,7 @@ class StepsBar(QtWidgets.QWidget):
         super().__init__(parent)
         self.setAccessibleName("Steps")
         self._current: StepInfo | None = None
+        self._waiting = False
         self.infos: list[StepInfo] = []
 
         self.chips: list[StepChip] = []
@@ -180,6 +181,16 @@ class StepsBar(QtWidgets.QWidget):
         layout.setSpacing(SPACE_S)
         layout.addLayout(row)
         layout.addLayout(action)
+
+    def set_waiting_for_driver(self, waiting: bool) -> None:
+        """While the driver check above has not passed, point to it and step aside.
+
+        The row keeps its line of text but not its button: the driver check has
+        the button that matters then, and the problem is explained once.
+        """
+        if waiting != self._waiting:
+            self._waiting = waiting
+            self.set_steps(self.infos)
 
     def current(self) -> StepInfo | None:
         return self._current
@@ -217,6 +228,10 @@ class StepsBar(QtWidgets.QWidget):
         self.next_button.setToolTip(
             "Carries out the current step (Ctrl+Return). The buttons below do the same "
             "and can be used in any order.")
+        self.next_button.setVisible(not self._waiting)
+        if self._waiting:
+            self.next_label.setText("First the driver check above. The buttons below "
+                                    "still work in any order.")
         self.next_button.setAccessibleDescription(self.next_label.text())
 
     def _clicked(self) -> None:

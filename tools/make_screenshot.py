@@ -7,6 +7,7 @@ Usage: python3 tools/make_screenshot.py [--theme quadsens|system] [--dark]
        python3 tools/make_screenshot.py [--theme ...] [--dark] --diagrams DIRECTORY
        python3 tools/make_screenshot.py [--theme ...] [--dark] --gallery DIRECTORY
        python3 tools/make_screenshot.py [--theme ...] [--dark] --setup OUTPUT.png
+       python3 tools/make_screenshot.py [--theme ...] [--dark] --checks DIRECTORY
 
 Uses a temp directory in place of sysfs and of the config file, a made-up
 calibration file and a stand-in for yeetmousectl. It does not create the uhid
@@ -33,6 +34,11 @@ Theme menu.
 --setup renders the driver setup dialog for a made-up machine that has the
 unmodified driver installed (default output: docs/screenshot-driver-setup.png).
 
+--checks renders the main window with the driver check in its states (passed,
+fixable, log in again, prerequisites missing) into DIRECTORY, each also at the
+minimum window size. Without DIRECTORY it writes only the fixable state, to
+docs/screenshot-driver-check.png.
+
 The calibration data is made up but consistent: the four multipliers are the
 1-2-1 weighted averages of the eight measured values, a few percent around 1.
 """
@@ -41,6 +47,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import struct
 import sys
 import tempfile
@@ -341,35 +348,113 @@ def gallery(directory: Path, mode: str) -> None:
     print("gallery in %s (%s)" % (directory, mode))
 
 
+def demo_probe(root: Path, driver: str = "fork", tools: bool = True,
+               in_session: bool = True) -> Probe:
+    """A made-up machine for the driver check and the driver setup dialog."""
+    kernel = "6.12.0-demo"
+    for folder in ("usr/bin", "usr/lib/systemd/system", "run/systemd/system", "etc",
+                   f"lib/modules/{kernel}/build"):
+        (root / folder).mkdir(parents=True, exist_ok=True)
+    (root / "etc/os-release").write_text("ID=arch\n")
+    status = ""
+    if driver == "fork":
+        status = f"yeetmouse-driver/0.9.5+dirscale1, {kernel}, x86_64: installed\n"
+        (root / "usr/bin/yeetmousectl").write_text("tool dirScaleXPos")
+        (root / "usr/lib/systemd/system/yeetmouse.service").write_text("unit")
+        params = root / "sys/module/yeetmouse/parameters"
+        params.mkdir(parents=True, exist_ok=True)
+        (params / "DirScaleXPos").write_text("1")
+    elif driver == "stock":
+        status = f"yeetmouse-driver/0.9.5, {kernel}, x86_64: installed\n"
+        (root / "usr/src/yeetmouse-driver-0.9.5").mkdir(parents=True, exist_ok=True)
+        (root / "usr/src/yeetmouse-driver-0.9.5/dkms.conf").write_text("x")
+        (root / "usr/bin/yeetmousectl").write_text("unmodified tool")
+        (root / "sys/module/yeetmouse/parameters").mkdir(parents=True, exist_ok=True)
+
+    def run(argv: list[str]) -> tuple[int, str]:
+        if argv[1:2] == ["status"]:
+            return 0, status
+        if argv[1:3] == ["group", "yeetmouse"] and driver != "none":
+            return 0, "yeetmouse:x:931:demo\n"
+        return 1, ""
+
+    present = ("dkms", "git", "make", "cc", "c++", "bash", "pkexec", "getent")
+    if not tools:
+        present = ("dkms", "bash", "pkexec", "getent")
+    return Probe(root=root, run=run, kernel=kernel,
+                 which=lambda name: f"/usr/bin/{name}" if name in present else None,
+                 session_groups=lambda: {931} if in_session else {1000},
+                 user=lambda: "demo")
+
+
+def check_renders(directory: Path | None, mode: str) -> None:
+    """The main window with the driver check in each of its states."""
+    app = QtWidgets.QApplication.instance()
+    doc_only = directory is None
+    if directory is None:
+        directory = ROOT / "docs"
+    directory.mkdir(parents=True, exist_ok=True)
+    cases = {
+        "passed": dict(driver="fork"),
+        "fix": dict(driver="stock"),
+        "relogin": dict(driver="fork", in_session=False),
+        "missing": dict(driver="none", tools=False),
+    }
+    if doc_only:
+        cases = {"fix": cases["fix"]}
+    for name, options in cases.items():
+        with tempfile.TemporaryDirectory(prefix="quadsens-demo-") as tmp:
+            params = Path(tmp, "sys", "yeetmouse", "parameters")
+            params.mkdir(parents=True)
+            for param in PARAM_NAMES:
+                (params / param).write_text("1.000000\n")
+            (params / "update").write_text("0\n")
+            if name == "relogin":
+                for param in PARAM_NAMES:
+                    (params / param).chmod(0)
+            if name in ("fix", "missing"):
+                shutil.rmtree(params)
+                if name == "fix":
+                    params.mkdir(parents=True)
+                    (params / "Sensitivity").write_text("1\n")
+            uhid = Path(tmp, "uhid")
+            uhid.write_bytes(b"")
+            cal_dir = Path(tmp, "Users", "u1", "ASFData", "mouse")
+            cal_dir.mkdir(parents=True)
+            (cal_dir / "ASFSettings.json").write_text(
+                json.dumps(demo_calibration(), separators=(",", ":")), encoding="utf-8")
+            settings = QtCore.QSettings(str(Path(tmp, "settings.ini")),
+                                        QtCore.QSettings.Format.IniFormat)
+            settings.setValue("ui/theme", mode)
+            config = Path(tmp, "yeetmouse.conf")
+            config.write_text("sens=1\n", encoding="ascii")
+            window = MainWindow(
+                settings, str(Path(tmp, "Users", "*", "ASFData", "*", "ASFSettings.json")),
+                Driver(params), None, uhid_path=str(uhid),
+                saver=Saver(config, tool=ROOT / "tests" / "fake_yeetmousectl.py"),
+                setup_probe=demo_probe(Path(tmp, "machine"), **options))
+            for size, suffix in (((860, 600), ""), ((720, 520), "-min")):
+                if doc_only and suffix:
+                    continue
+                window.resize(*size)
+                window.show()
+                window.driver_strip.wait()
+                for _ in range(6):
+                    app.processEvents()
+                target = directory / ("screenshot-driver-check.png" if doc_only
+                                      else f"drivercheck-{name}{suffix}.png")
+                window.grab().save(str(target))
+            hint = window.minimumSizeHint()
+            print("driver check %-8s %-9s minimum %dx%d" % (
+                name, window.driver_strip.strip.kind, hint.width(), hint.height()))
+            window.close()
+
+
 def setup_render(output: Path) -> None:
     """The driver setup dialog for a fixture machine: unmodified driver installed."""
     app = QtWidgets.QApplication.instance()
     with tempfile.TemporaryDirectory(prefix="quadsens-demo-") as tmp:
-        root = Path(tmp, "root")
-        tools = Path(tmp, "bin")
-        tools.mkdir()
-        kernel = "6.12.0-demo"
-        for folder in ("usr/src/yeetmouse-driver-0.9.5", "usr/bin", "etc",
-                       "run/systemd/system", f"lib/modules/{kernel}/build",
-                       "sys/module/yeetmouse/parameters"):
-            (root / folder).mkdir(parents=True)
-        (root / "usr/src/yeetmouse-driver-0.9.5/dkms.conf").write_text("x")
-        (root / "usr/bin/yeetmousectl").write_text("unmodified tool")
-        (root / "etc/os-release").write_text("ID=arch\n")
-        answers = {"status": f"yeetmouse-driver/0.9.5, {kernel}, x86_64: installed\n",
-                   "group": "yeetmouse:x:931:demo\n"}
-
-        def run(argv: list[str]) -> tuple[int, str]:
-            if argv[1:2] == ["status"]:
-                return 0, answers["status"]
-            if argv[1:3] == ["group", "yeetmouse"]:
-                return 0, answers["group"]
-            return 1, ""
-
-        present = ("dkms", "git", "make", "cc", "c++", "bash", "pkexec", "getent")
-        probe = Probe(root=root, run=run, kernel=kernel,
-                      which=lambda name: f"/usr/bin/{name}" if name in present else None,
-                      session_groups=lambda: {931}, user=lambda: "demo")
+        probe = demo_probe(Path(tmp, "root"), driver="stock")
         dialog = DriverSetupDialog(None, probe)
         dialog.resize(760, 640)
         dialog.show()
@@ -407,11 +492,14 @@ def _options(argv: list[str]) -> tuple[list[str], str, bool]:
 
 def main(argv: list[str]) -> int:
     argv, mode, dark = _options(argv)
-    for flag, render in (("--diagrams", None), ("--gallery", None), ("--setup", None)):
+    for flag, render in (("--diagrams", None), ("--gallery", None), ("--setup", None),
+                         ("--checks", None)):
         if flag in argv:
             rest = [arg for arg in argv if arg != flag]
             if flag == "--setup" and len(rest) < 2:
                 rest.append(str(ROOT / "docs" / "screenshot-driver-setup.png"))
+            if flag == "--checks" and len(rest) < 2:
+                rest.append("")
             if len(rest) < 2:
                 print("usage: make_screenshot.py %s DIRECTORY" % flag, file=sys.stderr)
                 return 2
@@ -426,6 +514,8 @@ def main(argv: list[str]) -> int:
                 diagram_renders(Path(rest[1]))
             elif flag == "--setup":
                 setup_render(Path(rest[1]))
+            elif flag == "--checks":
+                check_renders(Path(rest[1]) if rest[1] else None, mode)
             else:
                 gallery(Path(rest[1]), mode)
             return 0
@@ -473,9 +563,10 @@ def main(argv: list[str]) -> int:
         saver = Saver(config, tool=ROOT / "tests" / "fake_yeetmousectl.py")
 
         window = MainWindow(settings, pattern, Driver(params), None, uhid_path=str(uhid),
-                            saver=saver)
+                            saver=saver, setup_probe=demo_probe(Path(tmp, "machine")))
         window.resize(width, height)
         window.show()
+        window.driver_strip.wait()
 
         # Exercise the guided steps against the fixtures: use, flip Y, apply, save.
         window.calibration_panel.refresh()

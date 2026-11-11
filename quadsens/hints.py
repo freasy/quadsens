@@ -69,11 +69,11 @@ def driver_status(state: DriverState, helper_installed: bool = True) -> str:
     if status is DriverStatus.OK:
         return "Status: values read from the driver."
     if status is DriverStatus.NOT_LOADED:
-        return f"Status: module not loaded. Install or load the fork ({DRIVER_SETUP})."
+        return "Status: module not loaded (see the driver check above)."
     if status is DriverStatus.UNSUPPORTED:
-        return f"Status: no DirScale parameters, not the fork's module ({DRIVER_SETUP})."
+        return "Status: not the fork's module (see the driver check above)."
     if status is DriverStatus.NOT_READABLE:
-        return f"Status: not readable. Join group yeetmouse, log in again ({SETUP_HELP})."
+        return "Status: values not readable (see the driver check above)."
     return f"Status: error reading the driver ({state.message})."
 
 

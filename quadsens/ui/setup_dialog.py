@@ -179,6 +179,14 @@ class DriverSetupDialog(QtWidgets.QDialog):
         self.result.show_message(text, error, kind)
         self.result.setVisible(bool(text))
 
+    def focus_on(self, what: str) -> None:
+        """Bring the part the user came for to the front. Starts nothing."""
+        self.tabs.setCurrentIndex(0)
+        if what == ds.ACT_FIX and self.install_button.isEnabled():
+            self.install_button.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+        else:
+            self.overview.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+
     # ---- state ----------------------------------------------------------------------
 
     def is_busy(self) -> bool:
