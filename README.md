@@ -389,20 +389,75 @@ first.
 
 **What does not**
 
-- No driver installation: install RawAccel and usbip-win2 yourself.
 - Nothing is re-applied at start by QuadSens (see below).
+- QuadSens does not remove usbip-win2 or RawAccel; see
+  [Installing the two tools](#installing-the-two-tools) for how to do that.
+
+### Installing the two tools
+
+**Untested on Windows.** The first two lines of the window say whether
+usbip-win2 and RawAccel were found, and in which version. Each has an
+*Install…* button. You can equally install both yourself from their release
+pages and press *Check again* (for RawAccel: *Choose folder…*).
+
+What the buttons do, always after a dialog that says so and waits for you:
+
+- **Only the tested versions.** QuadSens installs exactly usbip-win2 0.9.8.1
+  (`USBip-0.9.8.1-x64.exe`) and RawAccel 1.7.1 (`RawAccel_v1.7.1.zip`). The
+  file is downloaded from the project's releases on github.com over HTTPS and
+  must match the size and SHA-256 checksum built into QuadSens; otherwise it
+  is deleted and nothing is started. The dialog shows the checksum.
+- **usbip-win2:** the installer is additionally checked for its signature
+  (signer "Cloudyne Systems (Scheibling Consulting AB)", through which the
+  project signs), then started. Windows asks for administrator rights. While
+  it installs, all USB devices can disconnect for a moment, and at its end
+  the installer asks to restart the computer. An older usbip-win2 is replaced
+  by the installer itself. Its own README advises making a restore point
+  first.
+- **RawAccel:** the zip is unpacked into a folder you confirm (default
+  `%LOCALAPPDATA%\Programs\RawAccel`; it must be yours to write to, because
+  RawAccel keeps `settings.json` there), each program file is checked against
+  its checksum, and RawAccel's `installer.exe` is started, which installs the
+  mouse driver. Windows asks for administrator rights. That installer is not
+  signed by its makers, so the checksum is the only check. **RawAccel works
+  only after the computer was restarted**; QuadSens never restarts it, shows
+  "restart Windows" in the strip until then, and *Apply* needs that restart
+  first. After the restart start `rawaccel.exe` once, so that it writes its
+  `settings.json`. RawAccel names the Visual C++ 2019 runtime and the .NET
+  Framework 4.7.2 or newer as prerequisites.
+- **Newer versions.** When it starts, and on *Check again*, QuadSens asks
+  `api.github.com` for the newest release of both projects and shows a quiet
+  line with a link if one is newer than the tested version. It does not
+  download or install versions it was not tested with. Nothing else is sent,
+  and there is no other telemetry. *Help > Check for newer tool versions
+  online* switches it off, as does the environment variable
+  `QUADSENS_NO_ONLINE_CHECK=1`. Without a network nothing happens and nothing
+  is reported.
+- An installed version that differs from the tested one is shown as
+  information; *Install tested version…* is offered only for an older one.
+
+Downloads are kept in `%LOCALAPPDATA%\QuadSens\downloads` and are checked
+again each time before use.
+
+**Removing them.** usbip-win2: *Windows Settings > Apps > Installed apps*,
+find USBip, *Uninstall*. RawAccel: run `uninstaller.exe` in the RawAccel
+folder, restart the computer, then delete the folder. The same is under *Help
+> Setup help*.
+
+**Licenses.** QuadSens downloads these tools from their projects and does not
+contain or redistribute them. usbip-win2 is under the BSD 2-Clause license,
+RawAccel under the MIT license.
 
 ### The virtual mouse on Windows
 
 Windows has no `/dev/uhid`. QuadSens serves the virtual mouse as a USB/IP
 device instead, and usbip-win2 attaches it as if it were plugged in.
 
-- **You install usbip-win2**, from its
-  [releases page](https://github.com/vadimgrn/usbip-win2/releases). Its
-  installer needs administrator rights and restarts the USB hubs, so all USB
-  devices drop out for a moment. QuadSens does not download or install it;
-  the first line of the window says whether it was found and has a button
-  that opens that page in the browser.
+- **It needs usbip-win2.** The first line of the window says whether it was
+  found and can install the tested version; see
+  [Installing the two tools](#installing-the-two-tools). Its installer needs
+  administrator rights and restarts the USB hubs, so all USB devices drop out
+  for a moment.
 - **Start virtual mouse** does two things in one click: it serves the device
   on this PC and runs `usbip.exe attach -r 127.0.0.1 -b 1-1` for you, without
   a console window. **Stop** detaches the port QuadSens attached (that port
@@ -413,7 +468,7 @@ device instead, and usbip-win2 attaches it as if it were plugged in.
   (USB ID `1B1C:2B43` by default) because the game only offers the
   calibration for such a device, and it answers the vendor software's
   questions with made-up values. It never moves the pointer.
-- QuadSens never asks for administrator rights. If Windows refuses the
+- Attaching never asks for administrator rights. If Windows refuses the
   attach on your machine, the card shows the command to run in a console
   opened as administrator.
 
@@ -445,7 +500,7 @@ serving and the device disappears on the Windows side.
 
 **Requirements**
 
-- RawAccel, unpacked and installed as its own instructions say. QuadSens was
+- RawAccel, installed from QuadSens or as its own instructions say. QuadSens was
   written against the setting names of RawAccel 1.7.1 and also recognises
   those of 1.6.x; with any other naming it refuses to write.
 - The folder must be writable for you, because `settings.json` in it is
@@ -646,6 +701,9 @@ quadsens/              application package
   usbip_server.py      the virtual mouse as a USB/IP device, for Windows (no Qt)
   usbip_client.py      runs usbip.exe of usbip-win2: attach, find our port, detach (no Qt)
   usbip_mouse.py       server plus attach as one thing with states (no Qt)
+  win_tools.py         the pinned releases of usbip-win2 and RawAccel (no Qt)
+  win_download.py      fetch a pinned file and check it (no Qt)
+  win_install.py       unpack, check and start the installers (no Qt)
   persist.py           save to the config file and verify it (no Qt)
   steps.py             the guided steps, derived from state (no Qt)
   model.py             value types and number parsing (no Qt)
