@@ -379,8 +379,8 @@ installing both tools from QuadSens, the automatic attach of the virtual
 mouse, the calibration in the game over the virtual mouse, and *Apply* to
 RawAccel all worked. That is one PC and one set of versions; other setups are
 untested. **Newer than that test and not yet run on Windows:** the "active"
-indicator with its read-back from RawAccel's driver, and *Re-apply at Windows
-sign-in*.
+indicator with its read-back from RawAccel's driver, *Re-apply at Windows
+sign-in*, and the acceleration editor.
 
 On Windows QuadSens has two parts: a virtual mouse served over USB/IP, which
 receives the calibration from the game, and a panel that writes the four
@@ -609,9 +609,12 @@ time; that is expected for an unsigned program.
 
 ## Editing the acceleration
 
-**New, and not yet tried on a real mouse on either system.** The numbers
-below come from the drivers' sources and from a userspace build of the
-yeetmouse fork's code, not from a running driver.
+**Status.** On Linux, Linear and Classic have been applied to the running
+yeetmouse fork from QuadSens on one machine and worked. Power, Natural, Jump
+and Off have not been applied to a running driver yet, and nothing of the
+acceleration editor has been tried on Windows. The limits and accuracy
+figures below come from the drivers' sources and from a userspace build of
+the yeetmouse fork's code, not from measurements on a running driver.
 
 Below the calibration and driver cards the window has an *Acceleration*
 card, always visible (*View > Acceleration…*, Ctrl+Shift+A, puts the keyboard
