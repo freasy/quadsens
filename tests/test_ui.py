@@ -34,6 +34,7 @@ from quadsens.ui.main_window import MainWindow, about_html
 from quadsens.ui.mouse_panel import WRITE_PREFIX, write_line_colors
 from quadsens.ui.scale_spin import ScaleSpinBox
 from quadsens.ui.status import StatusDot
+from quadsens.ui.theme import CONTROL_HEIGHT, ThemeManager, current_theme, env_forces_native
 
 FIXTURE = Path(__file__).parent / "fixtures" / "ASFSettings.json"
 FAKE_TOOL = Path(__file__).parent / "fake_yeetmousectl.py"
@@ -274,7 +275,7 @@ class MainWindowTest(unittest.TestCase):
         self.assertFalse(window.windowIcon().isNull())
         self.assertFalse(window.windowIcon().pixmap(32, 32).isNull())
         titles = [action.text() for action in window.menuBar().actions()]
-        self.assertEqual(titles, ["&File", "&Help"])
+        self.assertEqual(titles, ["&File", "View", "&Help"])
         self.assertEqual(window.open_folder_action.shortcut().toString(), "Ctrl+O")
         self.assertEqual(window.quit_action.shortcut().toString(), "Ctrl+Q")
         self.assertEqual(window.steps_action.shortcut().toString(), "F1")
@@ -694,8 +695,8 @@ class MainWindowTest(unittest.TestCase):
         bar = window.steps_bar
         self.assertEqual(self.statuses(window), "▶○○○○○")
         self.assertEqual(bar.chips[0].text(), "▶ 1 Start mouse")
-        self.assertTrue(bar.chips[0].font().bold())
-        self.assertFalse(bar.chips[1].font().bold())
+        self.assertTrue(bar.chips[0].is_current())
+        self.assertFalse(bar.chips[1].is_current())
         self.assertIn("Step 1 of 6", bar.next_label.text())
         self.assertEqual(bar.next_button.text(), "Start virtual mouse")
         self.assertTrue(bar.next_button.isDefault())
@@ -809,7 +810,8 @@ class MainWindowTest(unittest.TestCase):
         drv.spins[0].setValue(1.05)
         drv.apply_button.click()  # applied again, the file still has the old values
         self.assertIs(drv.save_state, SaveState.DIFFERS)
-        self.assertEqual(drv.saved_label.text(), "Applied, not saved: lost on module reload.")
+        self.assertEqual(drv.saved_label.text(),
+                         "⚠ Applied, not saved: lost on module reload.")
 
         self.config.write_text("sens=1\ndirScaleXPos=1.05\ndirScaleXNeg=0.9625\n"
                                "dirScaleYPos=1.125\ndirScaleYNeg=0.875\n")
@@ -962,6 +964,189 @@ class MainWindowTest(unittest.TestCase):
         hint = window.minimumSizeHint()
         self.assertLessEqual(hint.width(), 720, hint)
         self.assertLessEqual(hint.height(), 520, hint)
+
+    # ---- look ---------------------------------------------------------------
+
+    def dark_palette(self) -> QtGui.QPalette:
+        role = QtGui.QPalette.ColorRole
+        palette = QtGui.QPalette()
+        for name, color in ((role.Window, "#2a2e32"), (role.WindowText, "#e6e6e6"),
+                            (role.Base, "#1b1e20"), (role.Text, "#e6e6e6"),
+                            (role.Button, "#31363b"), (role.ButtonText, "#e6e6e6"),
+                            (role.Highlight, "#3daee9"), (role.HighlightedText, "#ffffff")):
+            palette.setColor(name, QtGui.QColor(color))
+        return palette
+
+    def test_stylesheet_is_generated_from_the_palette(self) -> None:
+        self.make_window()
+        manager = ThemeManager.instance()
+        self.assertFalse(manager.is_native())
+        sheet = _app.styleSheet()
+        theme = current_theme()
+        self.assertEqual(theme.window,
+                         _app.palette().color(QtGui.QPalette.ColorRole.Window).name())
+        for value in (theme.surface, theme.accent, theme.outline, theme.focus,
+                      theme.warning_bg):
+            self.assertIn(value, sheet)
+        self.assertEqual(theme.failures(), [])
+        self.assertIn("border-radius: 6px", sheet)
+        self.assertNotIn("transition", sheet)  # nothing animates
+        self.assertNotIn("animation", sheet)
+
+    def test_look_follows_a_palette_change(self) -> None:
+        self.make_window()
+        before = _app.styleSheet()
+        original = QtGui.QPalette(_app.palette())
+        self.addCleanup(lambda: (_app.setPalette(original), ThemeManager.instance().apply()))
+        _app.setPalette(self.dark_palette())
+        for _ in range(5):
+            _app.processEvents()
+        theme = current_theme()
+        self.assertTrue(theme.dark)
+        self.assertEqual(theme.window, "#2a2e32")
+        self.assertNotEqual(_app.styleSheet(), before)
+        self.assertIn(theme.surface, _app.styleSheet())
+        self.assertEqual(theme.failures(), [])
+
+    def test_every_focusable_control_keeps_a_focus_ring(self) -> None:
+        self.make_window()
+        sheet = _app.styleSheet()
+        theme = current_theme()
+        ring = "border: 2px solid %s" % theme.focus
+        for selector in ("QPushButton:focus", "QToolButton:focus", "QCheckBox:focus",
+                         "QPlainTextEdit:focus",
+                         "QLineEdit:focus, QComboBox:focus, QAbstractSpinBox:focus"):
+            start = sheet.index(selector + " {")
+            rule = sheet[start:sheet.index("}", start)]
+            self.assertIn(ring, rule, selector)
+        start = sheet.index('QPushButton[primary="true"]:focus {')
+        self.assertIn("border: 2px solid %s" % theme.focus_on_accent,
+                      sheet[start:sheet.index("}", start)])
+        self.assertNotIn("outline: none", sheet)
+
+    def test_hit_targets_are_at_least_28_px_high(self) -> None:
+        window = self.make_window()
+        window.driver_panel.advanced_toggle.setChecked(True)
+        window.mouse_panel.log_toggle.setChecked(True)
+        window.resize(860, 760)
+        window.show()
+        self.feed_write(window)
+        for _ in range(5):
+            _app.processEvents()
+        self.assertEqual(CONTROL_HEIGHT, 28)
+        kinds = (QtWidgets.QAbstractButton, QtWidgets.QAbstractSpinBox, QtWidgets.QComboBox,
+                 QtWidgets.QLineEdit)
+        checked = 0
+        for widget in window.centralWidget().findChildren(QtWidgets.QWidget):
+            if (isinstance(widget, kinds) and widget.isVisible()
+                    and not widget.objectName().startswith("qt_")):
+                checked += 1
+                self.assertGreaterEqual(widget.height(), 28, repr(widget))
+        self.assertGreaterEqual(checked, 18)
+
+    def test_primary_style_marks_the_current_step(self) -> None:
+        for name in PARAM_NAMES:
+            (self.params / name).write_text("0.990000\n")
+        window = self.make_window()
+        window.mouse_panel._factory = lambda pid, on_log: FakeSession(pid)
+        mouse, drv = window.mouse_panel, window.driver_panel
+
+        def primaries() -> list[str]:
+            return [button.text().replace("&", "") for button in window._step_buttons()
+                    if button.property("primary")]
+
+        self.assertTrue(window.steps_bar.next_button.property("primary"))
+        self.assertEqual(primaries(), ["Start virtual mouse"])
+        mouse.toggle_button.click()
+        self.assertEqual(primaries(), ["Reset to 1.0"])   # first press in the card
+        drv.reset_button.click()
+        self.assertEqual(primaries(), ["Apply"])          # then the second
+        drv.apply_button.click()
+        self.assertEqual(primaries(), [])                 # calibrating happens in the game
+        self.new_result(window)
+        self.assertEqual(primaries(), ["Use result"])
+        drv.use_button.click()
+        self.assertEqual(primaries(), ["Apply"])
+        drv.apply_button.click()
+        self.assertEqual(primaries(), ["Save to config"])
+        self.assertFalse(drv.read_button.property("primary"))
+
+    def test_system_style_switch_is_remembered(self) -> None:
+        window = self.make_window()
+        manager = ThemeManager.instance()
+        self.addCleanup(manager.set_native, False)
+        self.assertEqual(window.native_action.text(), "Use &system style")
+        self.assertTrue(window.native_action.isCheckable())
+        self.assertFalse(window.native_action.isChecked())
+        self.assertTrue(_app.styleSheet())
+        window.native_action.trigger()
+        self.assertTrue(manager.is_native())
+        self.assertEqual(_app.styleSheet(), "")
+        window.close()
+        again = self.make_window()
+        self.assertTrue(again.native_action.isChecked())
+        self.assertEqual(_app.styleSheet(), "")
+        hint = again.minimumSizeHint()  # the plain style fits as well
+        self.assertLessEqual((hint.width(), hint.height()), (720, 520))
+        again.native_action.trigger()
+        self.assertFalse(manager.is_native())
+        self.assertTrue(_app.styleSheet())
+
+    def test_environment_variable_switches_the_look_off(self) -> None:
+        manager = ThemeManager.instance()
+        self.addCleanup(manager.set_native, False)
+        with mock.patch.dict(os.environ, {"QUADSENS_NATIVE_STYLE": "1"}):
+            self.assertTrue(env_forces_native())
+            window = self.make_window()
+            self.assertTrue(manager.is_native())
+            self.assertEqual(_app.styleSheet(), "")
+            self.assertTrue(window.native_action.isChecked())
+            self.assertFalse(window.native_action.isEnabled())
+        self.assertFalse(env_forces_native())
+        with mock.patch.dict(os.environ, {"QUADSENS_NATIVE_STYLE": "0"}):
+            self.assertFalse(env_forces_native())
+
+    def test_banners_carry_a_mark_for_their_kind(self) -> None:
+        window = self.make_window()
+        drv = window.driver_panel
+        self.assertEqual(drv.message.kind, "")       # empty: nothing shown
+        self.assertEqual(drv.message.mark.text(), "")
+        drv.use_button.click()
+        self.assertEqual((drv.message.kind, drv.message.mark.text()), ("info", "ℹ"))
+        drv.apply_button.click()
+        self.assertEqual((drv.message.kind, drv.message.mark.text()), ("success", "✓"))
+        self.assertTrue(drv.message.text().startswith("✓ Applied"))
+        self.assertFalse(drv.message.label.text().startswith("✓"))  # the mark is not doubled
+        (self.params / "update").unlink()
+        drv.spins[0].setValue(1.3)
+        drv.apply_button.click()
+        self.assertEqual((drv.message.kind, drv.message.mark.text()), ("error", "✕"))
+        self.assertTrue(drv.message.text().startswith("Error: "))
+        self.assertEqual(drv.message.property("banner"), "error")
+        shutil.rmtree(self.params.parent)
+        drv.read_button.click()
+        self.assertEqual((drv.status_label.kind, drv.status_label.mark.text()),
+                         ("warning", "⚠"))
+
+    def test_disclosures_share_one_chevron(self) -> None:
+        window = self.make_window()
+        toggles = (window.mouse_panel.log_toggle, window.calibration_panel.details_toggle,
+                   window.driver_panel.advanced_toggle)
+        for toggle in toggles:
+            self.assertTrue(toggle.text().startswith("▸ "), toggle.text())
+            toggle.click()
+            self.assertTrue(toggle.text().startswith("▾ "), toggle.text())
+            self.assertNotIn("▸", toggle.accessibleName())
+            self.assertNotIn("&", toggle.accessibleName())
+        self.assertEqual([toggle.label() for toggle in toggles],
+                         ["Sho&w protocol log", "&Measured values", "Ad&vanced"])
+
+    def test_nothing_animates(self) -> None:
+        source = "".join(path.read_text(encoding="utf-8")
+                         for path in (Path(__file__).parent.parent / "quadsens" / "ui").glob("*.py"))
+        for name in ("QPropertyAnimation", "QVariantAnimation", "QTimeLine", "QMovie",
+                     "setGraphicsEffect"):
+            self.assertNotIn(name, source)
 
 
 if __name__ == "__main__":

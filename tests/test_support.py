@@ -125,7 +125,7 @@ class HintTest(unittest.TestCase):
     def test_save_state_texts(self) -> None:
         self.assertEqual(hints.save_state_text(SaveState.SAVED), "✓ Saved to config.")
         self.assertEqual(hints.save_state_text(SaveState.DIFFERS),
-                         "Applied, not saved: lost on module reload.")
+                         "⚠ Applied, not saved: lost on module reload.")
         self.assertIn("no directional values", hints.save_state_text(SaveState.MISSING_KEYS))
         self.assertIn("not found", hints.save_state_text(SaveState.DIFFERS, tool_found=False))
         self.assertIn("/usr/bin", hints.tool_missing())

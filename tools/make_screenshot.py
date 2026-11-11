@@ -2,6 +2,7 @@
 """Offscreen smoke test: build the main window against fixtures and save a screenshot.
 
 Usage: python3 tools/make_screenshot.py [--dark] [OUTPUT.png] [WIDTHxHEIGHT]
+       python3 tools/make_screenshot.py --sheet OUTPUT.png
 
 Uses a temp directory in place of sysfs and of the config file, a copy of the
 fixture calibration file and a stand-in for yeetmousectl. It does not create
@@ -9,12 +10,19 @@ the uhid device, run pkexec or touch /sys or /etc. The picture shows the
 window after Use result and Apply, with Save to config as the next step. The window
 shows fixture data only; the one path it displays is below a neutral temp
 directory. --dark renders with a dark palette instead of the default one.
+
+--sheet renders a contact sheet for checking the look by eye: the controls in
+their normal, hover, pressed, focused and disabled states, the banner kinds
+and the stepper, once with the light and once with the dark palette.
+
+The calibration data is made up but consistent: the four multipliers are the
+1-2-1 weighted averages of the eight measured values, a few percent around 1.
 """
 
 from __future__ import annotations
 
+import json
 import os
-import shutil
 import struct
 import sys
 import tempfile
@@ -27,10 +35,15 @@ sys.path.insert(0, str(ROOT))
 
 from quadsens import emulator  # noqa: E402
 from quadsens.driver import PARAM_NAMES, Driver  # noqa: E402
+from quadsens.model import Scalars  # noqa: E402
 from quadsens.persist import SaveState, Saver  # noqa: E402
-from quadsens.steps import Step  # noqa: E402
+from quadsens.steps import FlowState, Step, derive  # noqa: E402
 from quadsens.ui.main_window import MainWindow  # noqa: E402
 from quadsens.ui.qt import BINDING, QtCore, QtGui, QtWidgets  # noqa: E402
+from quadsens.ui.scale_spin import ScaleSpinBox  # noqa: E402
+from quadsens.ui.status import Card, Disclosure, MessageLabel  # noqa: E402
+from quadsens.ui.steps_bar import StepsBar  # noqa: E402
+from quadsens.ui.theme import ThemeManager, set_primary  # noqa: E402
 
 
 def dark_palette() -> QtGui.QPalette:
@@ -52,7 +65,192 @@ def dark_palette() -> QtGui.QPalette:
     return palette
 
 
+# Eight measured values in the order E, NE, N, NW, W, SW, S, SE.
+DEMO_DIRECTIONAL = (1.012, 1.006, 0.991, 0.996, 0.988, 0.992, 1.009, 1.014)
+
+
+def demo_calibration() -> dict[str, object]:
+    """A result file as the game writes it: four values derived from the eight."""
+    e, ne, n, nw, w, sw, s, se = DEMO_DIRECTIONAL
+
+    def side(left: float, middle: float, right: float) -> float:
+        return round((left + 2 * middle + right) / 4, 6)
+
+    return {"m_WeightMode": 0, "directionalScalars": list(DEMO_DIRECTIONAL),
+            "firmwareScalars": {"XPos": side(ne, e, se), "XNeg": side(nw, w, sw),
+                                "YPos": side(sw, s, se), "YNeg": side(ne, n, nw)}}
+
+
+def _sample(make, state: str = "") -> QtGui.QPixmap:
+    """Render one control on a card. ``make`` builds the control."""
+    app = QtWidgets.QApplication.instance()
+    card = Card("sample")
+    layout = QtWidgets.QHBoxLayout(card)
+    layout.setContentsMargins(10, 8, 10, 8)
+    widget = make()
+    layout.addWidget(widget)
+    if state == "disabled":
+        widget.setEnabled(False)
+    if state == "hover":
+        widget.setAttribute(QtCore.Qt.WidgetAttribute.WA_UnderMouse, True)
+    if state == "pressed" and isinstance(widget, QtWidgets.QAbstractButton):
+        widget.setDown(True)
+    if state != "focus":  # a lone control would take the focus by itself
+        for item in (widget, *widget.findChildren(QtWidgets.QWidget)):
+            item.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+    card.show()
+    if state == "focus":
+        card.activateWindow()
+        widget.setFocus(QtCore.Qt.FocusReason.TabFocusReason)
+    for _ in range(4):
+        app.processEvents()
+    if state == "focus" and not widget.hasFocus():
+        print("note: %s did not take the focus on this platform" % type(widget).__name__)
+    pixmap = card.grab()
+    card.close()
+    card.deleteLater()
+    return pixmap
+
+
+def contact_sheet(output: Path) -> None:
+    """Light and dark renderings of every restyled component, side by side."""
+    app = QtWidgets.QApplication.instance()
+    manager = ThemeManager.instance()
+
+    def button(text: str, primary: bool = False):
+        def make() -> QtWidgets.QWidget:
+            widget = QtWidgets.QPushButton(text)
+            set_primary(widget, primary)
+            return widget
+        return make
+
+    def line_edit() -> QtWidgets.QWidget:
+        return QtWidgets.QLineEdit("1.0110")
+
+    def spin() -> QtWidgets.QWidget:
+        widget = ScaleSpinBox()
+        widget.setDecimals(4)
+        widget.setRange(0.1, 10)
+        widget.setValue(1.011)
+        return widget
+
+    def combo() -> QtWidgets.QWidget:
+        widget = QtWidgets.QComboBox()
+        widget.addItems(["0x2B43 (default)", "0x2B44"])
+        return widget
+
+    def toggle(shown: bool):
+        def make() -> QtWidgets.QWidget:
+            widget = Disclosure("Ad&vanced", QtWidgets.QWidget())
+            widget.setChecked(shown)
+            return widget
+        return make
+
+    def check(checked: bool):
+        def make() -> QtWidgets.QWidget:
+            widget = QtWidgets.QCheckBox("Flip &Y")
+            widget.setChecked(checked)
+            return widget
+        return make
+
+    def banner(kind: str, text: str):
+        def make() -> QtWidgets.QWidget:
+            widget = MessageLabel(kind)
+            widget.setMinimumWidth(330)
+            widget.show_message(text, error=kind == "error", kind=kind)
+            return widget
+        return make
+
+    def log() -> QtWidgets.QWidget:
+        widget = QtWidgets.QPlainTextEdit()
+        widget.setReadOnly(True)
+        widget.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.NoWrap)
+        widget.setPlainText("\n".join("12:00:%02d [cmd] GET id=%d value=0 | rx 00010102%02x"
+                                      % (i, i, i) for i in range(12)))
+        widget.setFixedSize(300, 90)
+        return widget
+
+    def stepper(state: FlowState):
+        def make() -> QtWidgets.QWidget:
+            widget = StepsBar()
+            widget.set_steps(derive(state))
+            widget.setMinimumWidth(640)
+            return widget
+        return make
+
+    states = ("", "hover", "pressed", "focus", "disabled")
+    rows: list[tuple[str, list[tuple]]] = [
+        ("Secondary button: normal, hover, pressed, focus, disabled",
+         [(button("Read again"), st) for st in states]),
+        ("Primary button: normal, hover, pressed, focus, disabled",
+         [(button("Save to config", True), st) for st in states]),
+        ("Text field, spin box, combo box: normal, focus, disabled",
+         [(make, st) for make in (line_edit, spin, combo) for st in ("", "focus", "disabled")]),
+        ("Disclosure: closed, hover, open, focus; check box: off, on, focus, disabled",
+         [(toggle(False), ""), (toggle(False), "hover"), (toggle(True), ""),
+          (toggle(False), "focus"), (check(False), ""), (check(True), ""),
+          (check(True), "focus"), (check(True), "disabled")]),
+        ("Banners: info, success", [
+            (banner("info", "Filled from the result file. Press Apply to write them."), ""),
+            (banner("success", "✓ Applied directly. The driver reports the new values."), "")]),
+        ("Banners: warning, error", [
+            (banner("warning", "Status: not readable. Join group yeetmouse, log in again."),
+             ""),
+            (banner("error", "Not saved: authorization was dismissed"), "")]),
+        ("Log view with thin scroll bars", [(log, "")]),
+        ("Stepper: current step 3, with done and pending steps",
+         [(stepper(FlowState(mouse_running=True, driver=Scalars.unity())), "")]),
+    ]
+
+    halves: list[QtGui.QImage] = []
+    for palette in (app.style().standardPalette(), dark_palette()):
+        app.setPalette(palette)
+        manager.apply()
+        theme = manager.theme()
+        rendered = [(title, [_sample(make, st) for make, st in samples])
+                    for title, samples in rows]
+        width = max(sum(p.width() + 8 for p in pixmaps) for _t, pixmaps in rendered) + 24
+        height = sum(26 + max(p.height() for p in pixmaps) + 10 for _t, pixmaps in rendered) + 16
+        image = QtGui.QImage(width, height, QtGui.QImage.Format.Format_ARGB32)
+        image.fill(QtGui.QColor(theme.window))
+        painter = QtGui.QPainter(image)
+        y = 10
+        for title, pixmaps in rendered:
+            painter.setPen(QtGui.QColor(theme.muted))
+            painter.drawText(12, y + 14, title)
+            y += 22
+            x = 12
+            for pixmap in pixmaps:
+                painter.drawPixmap(x, y, pixmap)
+                x += pixmap.width() + 8
+            y += max(p.height() for p in pixmaps) + 14
+        painter.end()
+        halves.append(image)
+    sheet = QtGui.QImage(max(h.width() for h in halves), sum(h.height() for h in halves),
+                         QtGui.QImage.Format.Format_ARGB32)
+    sheet.fill(QtGui.QColor("#808080"))
+    painter = QtGui.QPainter(sheet)
+    y = 0
+    for half in halves:
+        painter.drawImage(0, y, half)
+        y += half.height()
+    painter.end()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(str(output))
+    print("contact sheet %s (%dx%d)" % (output, sheet.width(), sheet.height()))
+
+
 def main(argv: list[str]) -> int:
+    if "--sheet" in argv:
+        argv = [arg for arg in argv if arg != "--sheet"]
+        if len(argv) < 2:
+            print("usage: make_screenshot.py --sheet OUTPUT.png", file=sys.stderr)
+            return 2
+        QtCore.QLocale.setDefault(QtCore.QLocale.c())
+        app = QtWidgets.QApplication([argv[0]])
+        ThemeManager.instance().apply()
+        contact_sheet(Path(argv[1]))
+        return 0
     dark = "--dark" in argv
     argv = [arg for arg in argv if arg != "--dark"]
     default_name = "screenshot-dark.png" if dark else "screenshot.png"
@@ -60,7 +258,6 @@ def main(argv: list[str]) -> int:
     width, height = (int(n) for n in (argv[2] if len(argv) > 2 else "860x600").split("x"))
     QtCore.QLocale.setDefault(QtCore.QLocale.c())
     app = QtWidgets.QApplication([argv[0]])
-    app.setStyle("Fusion")
     if dark:
         app.setPalette(dark_palette())
     # The calibration panel shows this path, so keep it free of user names.
@@ -75,7 +272,8 @@ def main(argv: list[str]) -> int:
         uhid.write_bytes(b"")
         cal_dir = Path(tmp, "Users", "u1", "ASFData", "mouse")
         cal_dir.mkdir(parents=True)
-        shutil.copy(ROOT / "tests" / "fixtures" / "ASFSettings.json", cal_dir)
+        (cal_dir / "ASFSettings.json").write_text(
+            json.dumps(demo_calibration(), separators=(",", ":")), encoding="utf-8")
         pattern = str(Path(tmp, "Users", "*", "ASFData", "*", "ASFSettings.json"))
         settings = QtCore.QSettings(str(Path(tmp, "settings.ini")),
                                     QtCore.QSettings.Format.IniFormat)

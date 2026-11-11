@@ -5,50 +5,84 @@ from __future__ import annotations
 from .qt import QtCore, QtGui, QtWidgets
 
 
-# One spacing scale for the whole window.
-SPACE_S, SPACE_M, SPACE_L = 4, 8, 14
+# One spacing scale for the whole window: multiples of 4.
+SPACE_S, SPACE_M, SPACE_L = 4, 8, 12
+# One typographic scale, as factors of the application font.
+FONT_HEADING, FONT_BODY, FONT_CAPTION = 1.1, 1.0, 0.92
+# Chevrons of the disclosure toggles: collapsed and expanded.
+CHEVRON_CLOSED, CHEVRON_OPEN = "▸", "▾"
 
 
 def heading(text: str) -> QtWidgets.QLabel:
-    """Section heading: bold, slightly larger than the body text."""
+    """Section heading: semibold, slightly larger than the body text."""
     label = QtWidgets.QLabel(text)
     font = label.font()
-    font.setBold(True)
-    font.setPointSizeF(font.pointSizeF() * 1.08)
+    font.setWeight(QtGui.QFont.Weight.DemiBold)
+    font.setPointSizeF(font.pointSizeF() * FONT_HEADING)
     label.setFont(font)
+    label.setProperty("role", "heading")
+    return label
+
+
+def caption(label: QtWidgets.QLabel) -> QtWidgets.QLabel:
+    """Turn a label into secondary text: smaller and, in the custom look, muted."""
+    font = label.font()
+    font.setPointSizeF(font.pointSizeF() * FONT_CAPTION)
+    label.setFont(font)
+    label.setProperty("role", "caption")
     return label
 
 
 def column_header(text: str) -> QtWidgets.QLabel:
-    label = QtWidgets.QLabel(text)
+    label = caption(QtWidgets.QLabel(text))
     font = label.font()
-    font.setBold(True)
+    font.setWeight(QtGui.QFont.Weight.DemiBold)
     label.setFont(font)
     return label
 
 
-class Disclosure(QtWidgets.QToolButton):
-    """Arrow button that shows or hides a part of the window.
+class Card(QtWidgets.QFrame):
+    """A section of the window: its own surface with a border and padding."""
 
-    The arrow points right while the part is hidden and down while it is shown;
-    the checked state carries the same information for assistive technology.
+    def __init__(self, accessible_name: str, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("card")
+        self.setAccessibleName(accessible_name)
+
+    def card_layout(self) -> QtWidgets.QVBoxLayout:
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(SPACE_L, SPACE_M, SPACE_L, SPACE_M)
+        layout.setSpacing(SPACE_S)
+        return layout
+
+
+class Disclosure(QtWidgets.QToolButton):
+    """Button that shows or hides a part of the window.
+
+    A chevron in front of the text points right while the part is hidden and
+    down while it is shown; the checked state carries the same information for
+    assistive technology.
     """
 
     def __init__(self, text: str, target: QtWidgets.QWidget,
                  parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._target = target
-        self.setText(text)
+        self._label = text
+        self.setAccessibleName(text.replace("&", ""))
         self.setCheckable(True)
         self.setAutoRaise(True)
-        self.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.TabFocus)
         self.toggled.connect(self._apply)
         self._apply(False)
 
+    def label(self) -> str:
+        """The text without the chevron."""
+        return self._label
+
     def _apply(self, shown: bool) -> None:
-        self.setArrowType(QtCore.Qt.ArrowType.DownArrow if shown
-                          else QtCore.Qt.ArrowType.RightArrow)
+        self.setText("%s %s" % (CHEVRON_OPEN if shown else CHEVRON_CLOSED, self._label))
         self._target.setVisible(shown)
 
 
@@ -137,17 +171,62 @@ class WrapLabel(QtWidgets.QLabel):
             self.updateGeometry()
 
 
-class MessageLabel(WrapLabel):
-    """Inline status/error line. Errors are marked by wording and weight, not colour."""
+# Kinds of banner and the mark shown in front of the text, so that the kind
+# never depends on the tint alone.
+BANNER_MARKS = {"info": "ℹ", "success": "✓", "warning": "⚠", "error": "✕"}
+
+
+class MessageLabel(QtWidgets.QFrame):
+    """Inline banner for status and hint messages.
+
+    Each kind (info, success, warning, error) has its own mark and, in the
+    custom look, its own tint. Errors additionally start with the word "Error".
+    An empty banner keeps its place in the layout but shows nothing.
+    """
 
     def __init__(self, accessible_name: str, parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__(accessible_name, parent)
+        super().__init__(parent)
         self.is_error = False
+        self.kind = ""
+        self._text = ""
+        self.mark = QtWidgets.QLabel()
+        self.mark.setObjectName("bannerMark")
+        font = self.mark.font()
+        font.setBold(True)
+        self.mark.setFont(font)
+        self.mark.setFixedWidth(self.mark.fontMetrics().horizontalAdvance("⚠") + 4)
+        self.mark.setAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter
+                               | QtCore.Qt.AlignmentFlag.AlignTop)
+        self.label = WrapLabel(accessible_name)
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(SPACE_M - 2, 3, SPACE_M, 3)
+        layout.setSpacing(SPACE_S)
+        layout.addWidget(self.mark, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self.label, 1)
+        self.setProperty("banner", "")
 
-    def show_message(self, text: str, error: bool = False) -> None:
+    def text(self) -> str:
+        """The message as given, including the "Error: " prefix of errors."""
+        return self._text
+
+    def show_message(self, text: str, error: bool = False, kind: str = "") -> None:
+        """Show ``text``; the kind defaults to error, success (text starts with ✓) or info."""
         self.is_error = error
-        font = self.font()
-        font.setBold(error)
-        self.setFont(font)
-        self.setText(("Error: " + text) if error and text else text)
-        self.setToolTip(self.text())
+        if not text:
+            kind = ""
+        elif error:
+            kind = "error"
+        elif not kind:
+            kind = "success" if text.startswith("✓") else "info"
+        self._text = ("Error: " + text) if error and text else text
+        shown = self._text[1:].lstrip() if self._text.startswith("✓") else self._text
+        self.mark.setText(BANNER_MARKS.get(kind, ""))
+        self.label.setText(shown)
+        self.label.setToolTip(shown)
+        if kind != self.kind:
+            self.kind = kind
+            self.setProperty("banner", kind)
+            style = self.style()
+            style.unpolish(self)
+            style.polish(self)
+            self.update()

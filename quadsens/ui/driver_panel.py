@@ -21,9 +21,11 @@ from .scale_spin import ScaleSpinBox
 from .status import (
     SPACE_M,
     SPACE_S,
+    Card,
     Disclosure,
     MessageLabel,
     WrapLabel,
+    caption,
     column_header,
     heading,
 )
@@ -38,7 +40,7 @@ SAME_VALUE = 0.5 * 10 ** -DECIMALS + 1e-9
 CHANGED_MARK = "≠"
 
 
-class DriverPanel(QtWidgets.QWidget):
+class DriverPanel(Card):
     # Something the step display depends on changed: values, driver or save state.
     changed = Signal()
     # A set of values reached the driver.
@@ -49,8 +51,7 @@ class DriverPanel(QtWidgets.QWidget):
                  get_result: Callable[[], Result | None],
                  saver: Saver | None = None,
                  parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setAccessibleName("Driver (yeetmouse)")
+        super().__init__("Driver (yeetmouse)", parent)
         self._driver = driver
         self._settings = settings
         self._get_result = get_result
@@ -65,7 +66,7 @@ class DriverPanel(QtWidgets.QWidget):
 
         grid = QtWidgets.QGridLayout()
         grid.setHorizontalSpacing(SPACE_M)
-        grid.setVerticalSpacing(SPACE_S)
+        grid.setVerticalSpacing(2)
         for column, title in enumerate(("Direction", "Driver reports", "", "New value")):
             grid.addWidget(column_header(title), 0, column)
         self.current_labels: list[QtWidgets.QLabel] = []
@@ -96,7 +97,7 @@ class DriverPanel(QtWidgets.QWidget):
             current.setToolTip(f"Value of {name} the loaded module reports")
             current.setTextInteractionFlags(
                 QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-            deviation = QtWidgets.QLabel()
+            deviation = caption(QtWidgets.QLabel())
             deviation.setAccessibleName(f"Deviation from 1.0 for {name} ({direction})")
             deviation.setToolTip("Deviation of the driver value from 1.0 in percent")
             deviation.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight
@@ -118,7 +119,7 @@ class DriverPanel(QtWidgets.QWidget):
 
         # Two lines of state. A driver problem takes the place of both, so that
         # a hint never changes the height of the panel.
-        self.status_label = WrapLabel("Driver status")
+        self.status_label = MessageLabel("Driver status")
         self.pending_label = QtWidgets.QLabel()
         self.pending_label.setAccessibleName("Unsaved changes")
         self.pending_label.setToolTip(
@@ -134,7 +135,8 @@ class DriverPanel(QtWidgets.QWidget):
         state_layout.addWidget(self.pending_label)
         state_layout.addWidget(self.saved_label)
         state_layout.addStretch(1)
-        state_box.setMinimumHeight(2 * self.pending_label.fontMetrics().height() + 4)
+        # Room for two lines of text, plain or inside the banner.
+        state_box.setMinimumHeight(2 * self.pending_label.fontMetrics().height() + 8)
 
         self.use_button = QtWidgets.QPushButton("Use resul&t")
         self.use_button.setToolTip("Fill the new values from the calibration result")
@@ -168,7 +170,7 @@ class DriverPanel(QtWidgets.QWidget):
         self.flip_check.setToolTip("Exchange the down and up values. " + FLIP_Y)
         self.flip_check.setChecked(bool(settings.value("driver/flip_y", False, type=bool)))
         self.flip_check.toggled.connect(self._flip_toggled)
-        self.flip_hint = WrapLabel("About Flip Y")
+        self.flip_hint = caption(WrapLabel("About Flip Y"))
         self.flip_hint.setText(FLIP_Y)
         self.auto_check = QtWidgets.QCheckBox("Apply saved values on start")
         self.auto_check.setToolTip(
@@ -198,9 +200,7 @@ class DriverPanel(QtWidgets.QWidget):
 
         self.message = MessageLabel("Driver message")
 
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(SPACE_S + 2)
+        layout = self.card_layout()
         head = QtWidgets.QHBoxLayout()
         head.addWidget(heading("Driver (yeetmouse)"), 1)
         head.addWidget(self.advanced_toggle)
@@ -298,7 +298,9 @@ class DriverPanel(QtWidgets.QWidget):
             label.setText(NO_VALUE if values is None else f"{values[index]:.6f}")
             self.deviation_labels[index].setText(
                 "" if values is None else format_deviation(values[index]))
-        self.status_label.setText(driver_status(state, self._driver.helper_installed()))
+        self.status_label.show_message(
+            driver_status(state, self._driver.helper_installed()),
+            kind="info" if state.status is DriverStatus.OK else "warning")
         self.save_state = self._saver.state(self.driver_values())
         self._update_pending()
         self.changed.emit()

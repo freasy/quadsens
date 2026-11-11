@@ -26,7 +26,7 @@ from ..hints import (
 )
 from ..model import Scalars
 from ..persist import Saver
-from ..steps import FlowState, Step, StepInfo, derive, is_unity
+from ..steps import FlowState, Status, Step, StepInfo, derive, is_unity
 from .calibration_panel import CalibrationPanel
 from .driver_panel import SAME_VALUE, DriverPanel
 from .icon import app_icon
@@ -34,6 +34,7 @@ from .mouse_panel import MousePanel
 from .qt import QtCore, QtGui, QtWidgets
 from .status import SPACE_L, SPACE_M
 from .steps_bar import StepsBar
+from .theme import ThemeManager, env_forces_native, set_primary
 
 DEFAULT_SIZE = (860, 600)
 
@@ -45,13 +46,6 @@ def about_html() -> str:
     return (f"<h3>{title}</h3><p>{summary}</p>"
             f"<p>{license_line}<br><a href=\"{url}\">{url}</a></p>"
             f"<p>{disclaimer}</p>")
-
-
-def _separator() -> QtWidgets.QFrame:
-    line = QtWidgets.QFrame()
-    line.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-    line.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
-    return line
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -72,6 +66,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.open_url: Callable[[QtCore.QUrl], object] = QtGui.QDesktopServices.openUrl
         self.setWindowTitle(about.APP_NAME)
         self.setWindowIcon(app_icon())
+        # The look is application-wide; the window only owns the switch for it.
+        self.theme = ThemeManager.instance()
+        self.theme.set_native(bool(settings.value("ui/native_style", False, type=bool)))
+        self.theme.apply()
 
         def make_session(pid: int, on_log: Callable[[LogEntry], None]) -> EmulatorSession:
             return EmulatorSession(product_id=pid, state_path=emulator_state_path,
@@ -85,7 +83,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.calibration_panel.set_flip_y(self.driver_panel.flip_y())
 
         self._lower = QtWidgets.QHBoxLayout()
-        self._lower.setSpacing(SPACE_L + SPACE_M)
+        self._lower.setSpacing(SPACE_M)
         self._lower.addWidget(self.calibration_panel, 1)
         self._lower.addWidget(self.driver_panel, 1)
 
@@ -94,9 +92,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setContentsMargins(SPACE_L, SPACE_M, SPACE_L, SPACE_M)
         layout.setSpacing(SPACE_M)
         layout.addWidget(self.steps_bar)
-        layout.addWidget(_separator())
         layout.addWidget(self.mouse_panel)
-        layout.addWidget(_separator())
         layout.addLayout(self._lower)
         self.setCentralWidget(central)
 
@@ -161,6 +157,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.quit_action.triggered.connect(self.close)
         file_menu.addAction(self.quit_action)
 
+        # No mnemonic: every letter of "View" belongs to a control of the window.
+        view_menu = self.menuBar().addMenu("View")
+        self.native_action = QtGui.QAction("Use &system style", self)
+        self.native_action.setCheckable(True)
+        self.native_action.setChecked(self.theme.is_native())
+        self.native_action.setEnabled(not env_forces_native())
+        self.native_action.setToolTip(
+            "Show the window in the plain style of the desktop instead of the "
+            "application's own look")
+        self.native_action.toggled.connect(self.set_native_style)
+        view_menu.addAction(self.native_action)
+        view_menu.setToolTipsVisible(True)
+
         help_menu = self.menuBar().addMenu("&Help")
         self.steps_action = QtGui.QAction("&First steps", self)
         self.steps_action.setShortcut(
@@ -181,6 +190,11 @@ class MainWindow(QtWidgets.QMainWindow):
             if button.objectName() == "qt_menubar_ext_button":
                 button.setAccessibleName("More menus")
                 button.setFocusPolicy(QtCore.Qt.FocusPolicy.TabFocus)
+
+    def set_native_style(self, native: bool) -> None:
+        """Switch between the application's own look and the system style."""
+        self._settings.setValue("ui/native_style", bool(native))
+        self.theme.set_native(native)
 
     def show_first_steps(self) -> None:
         self._open_box("First steps", "<h3>First steps</h3><ol>%s</ol><p>%s</p>" % (
@@ -274,7 +288,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self.steps_bar.set_steps(infos)
         if self.driver_panel.is_busy():
             self.steps_bar.next_button.setEnabled(False)
+        # The card button that does the current step is the primary one there.
+        primary = self.step_button(infos)
+        for button in self._step_buttons():
+            set_primary(button, button is primary)
         return infos
+
+    def _step_buttons(self) -> list[QtWidgets.QPushButton]:
+        panel = self.driver_panel
+        return [self.mouse_panel.toggle_button, panel.use_button, panel.reset_button,
+                panel.apply_button, panel.save_button]
+
+    def step_button(self, infos: list[StepInfo]) -> QtWidgets.QPushButton | None:
+        """The button inside a card that carries out the current step, if any."""
+        current = next((info for info in infos if info.status is Status.CURRENT), None)
+        if current is None:
+            return None
+        panel = self.driver_panel
+        if current.step is Step.START:
+            return self.mouse_panel.toggle_button
+        if current.step is Step.RESET:
+            # Two presses in the card: first reset the new values, then apply them.
+            return panel.apply_button if is_unity(panel.values()) else panel.reset_button
+        if current.step is Step.USE:
+            return panel.use_button
+        if current.step is Step.APPLY:
+            return panel.apply_button
+        if current.step is Step.SAVE:
+            return panel.save_button
+        return None
 
     def run_step(self, step: Step) -> None:
         """Carry out the action of a step, as the button in its panel would."""

@@ -15,6 +15,11 @@ class ScaleSpinBox(QtWidgets.QDoubleSpinBox):
     separator, which silently turns 1.0375 into a different number.
     """
 
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        # Styled spin boxes place their editor at the very edge of the frame.
+        self.lineEdit().setTextMargins(6, 0, 0, 0)
+
     def textFromValue(self, value: float) -> str:  # noqa: N802 (Qt name)
         return format_decimal(value, self.decimals())
 

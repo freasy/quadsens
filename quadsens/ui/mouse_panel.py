@@ -17,7 +17,16 @@ from ..emulator import (
 )
 from ..hints import UHID_OK, uhid_short
 from .qt import QtCore, QtGui, QtWidgets, Signal
-from .status import SPACE_M, SPACE_S, Disclosure, MessageLabel, StatusDot, heading
+from .status import (
+    SPACE_M,
+    SPACE_S,
+    Card,
+    Disclosure,
+    MessageLabel,
+    StatusDot,
+    caption,
+    heading,
+)
 
 LOG_LINES = 500
 # Lines that report a directional write start with this marker. The marker is
@@ -61,7 +70,7 @@ class WriteHighlighter(QtGui.QSyntaxHighlighter):
         self.setFormat(0, len(text), fmt)
 
 
-class MousePanel(QtWidgets.QWidget):
+class MousePanel(Card):
     """Runs the emulator inside the GUI thread.
 
     The uhid descriptors are watched with QSocketNotifier, so each kernel event
@@ -75,8 +84,7 @@ class MousePanel(QtWidgets.QWidget):
                  uhid_access: Callable[[], str] | None = None,
                  settings: QtCore.QSettings | None = None,
                  parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setAccessibleName("Virtual mouse")
+        super().__init__("Virtual mouse", parent)
         self._factory = session_factory
         self._uhid_access = uhid_access
         self._access = UHID_OK
@@ -108,6 +116,10 @@ class MousePanel(QtWidgets.QWidget):
         self.dot = StatusDot()
         self.status_label = QtWidgets.QLabel()
         self.status_label.setAccessibleName("Virtual mouse status")
+        # A long status must not widen the window; the tooltip has it in full.
+        self.status_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
+                                        QtWidgets.QSizePolicy.Policy.Preferred)
+        self.status_label.setMinimumWidth(120)
         self.message = MessageLabel("Virtual mouse message")
 
         self.log_view = QtWidgets.QPlainTextEdit()
@@ -136,7 +148,7 @@ class MousePanel(QtWidgets.QWidget):
 
         # The log is protocol detail: hidden until asked for, summarised meanwhile.
         self.log_box = QtWidgets.QWidget()
-        self.summary_label = QtWidgets.QLabel("No events yet.")
+        self.summary_label = caption(QtWidgets.QLabel("No events yet."))
         self.summary_label.setAccessibleName("Last event of the virtual mouse")
         self.summary_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
                                          QtWidgets.QSizePolicy.Policy.Preferred)
@@ -146,7 +158,7 @@ class MousePanel(QtWidgets.QWidget):
             "the line next to this button names the last event that matters.")
         self.log_toggle.setAccessibleDescription(self.log_toggle.toolTip())
 
-        self.follow_label = QtWidgets.QLabel()
+        self.follow_label = caption(QtWidgets.QLabel())
         self.follow_label.setAccessibleName("Log auto-scroll state")
         self.copy_button = QtWidgets.QPushButton("C&opy log")
         self.copy_button.setToolTip("Copy the whole log to the clipboard")
@@ -166,10 +178,11 @@ class MousePanel(QtWidgets.QWidget):
         controls.addWidget(pid_label)
         controls.addWidget(self.pid_combo)
 
-        summary = QtWidgets.QHBoxLayout()
-        summary.setSpacing(SPACE_M)
-        summary.addWidget(self.log_toggle)
-        summary.addWidget(self.summary_label, 1)
+        head = QtWidgets.QHBoxLayout()
+        head.setSpacing(SPACE_M + SPACE_S)
+        head.addWidget(heading("Virtual mouse"))
+        head.addWidget(self.summary_label, 1)
+        head.addWidget(self.log_toggle)
 
         log_bar = QtWidgets.QHBoxLayout()
         log_bar.setSpacing(SPACE_M)
@@ -182,13 +195,10 @@ class MousePanel(QtWidgets.QWidget):
         log_layout.addWidget(self.log_view, 1)
         log_layout.addLayout(log_bar)
 
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(SPACE_S + 2)
-        layout.addWidget(heading("Virtual mouse"))
+        layout = self.card_layout()
+        layout.addLayout(head)
         layout.addLayout(controls)
         layout.addWidget(self.message)
-        layout.addLayout(summary)
         layout.addWidget(self.log_box, 1)
         self.message.hide()
         if settings is not None:
@@ -379,3 +389,4 @@ class MousePanel(QtWidgets.QWidget):
             self.dot.set_state(StatusDot.WAITING)
             self.status_label.setText("Running: waiting for a client (%04X:%04X)"
                                       % (VENDOR_ID, session.product_id))
+        self.status_label.setToolTip(self.status_label.text())

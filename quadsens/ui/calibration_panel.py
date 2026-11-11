@@ -20,7 +20,17 @@ from ..emulator import DirectionalWrites
 from ..hints import NO_RESULT
 from .compass import DirectionDiagram
 from .qt import QtCore, QtWidgets, Signal
-from .status import SPACE_L, SPACE_M, SPACE_S, Disclosure, MessageLabel, column_header, heading
+from .status import (
+    SPACE_L,
+    SPACE_M,
+    Card,
+    Disclosure,
+    MessageLabel,
+    WrapLabel,
+    caption,
+    column_header,
+    heading,
+)
 
 ROWS: tuple[tuple[str, str], ...] = (
     ("XPos", "x_pos"), ("XNeg", "x_neg"), ("YPos", "y_pos"), ("YNeg", "y_neg"))
@@ -31,13 +41,12 @@ def _stamp(seconds: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(seconds))
 
 
-class CalibrationPanel(QtWidgets.QWidget):
+class CalibrationPanel(Card):
     calibration_changed = Signal()
 
     def __init__(self, pattern: str, settings: QtCore.QSettings | None = None,
                  parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setAccessibleName("Calibration result")
+        super().__init__("Calibration result", parent)
         self._pattern = pattern
         self._settings = settings
         self._flip_y = False
@@ -57,7 +66,7 @@ class CalibrationPanel(QtWidgets.QWidget):
         self.refresh_button.setToolTip("Look for the newest calibration file again")
         self.refresh_button.setAccessibleDescription(self.refresh_button.toolTip())
         self.refresh_button.clicked.connect(self.refresh)
-        self.mtime_label = QtWidgets.QLabel()
+        self.mtime_label = caption(QtWidgets.QLabel())
         self.mtime_label.setAccessibleName("Calibration file modification time")
 
         top = QtWidgets.QHBoxLayout()
@@ -96,10 +105,10 @@ class CalibrationPanel(QtWidgets.QWidget):
         self.enabled_label = QtWidgets.QLabel(NO_VALUE)
         self.enabled_label.setAccessibleName("Enabled flag sent to virtual mouse")
         grid.addWidget(self.enabled_label, len(ROWS) + 1, 2)
-        self.emulator_time_label = QtWidgets.QLabel("Nothing sent this session")
+        self.emulator_time_label = caption(QtWidgets.QLabel("Nothing sent this session"))
         self.emulator_time_label.setAccessibleName("Time of last write to virtual mouse")
         grid.addWidget(self.emulator_time_label, len(ROWS) + 2, 0, 1, 3)
-        self.directional_label = MessageLabel("Eight measured directional values")
+        self.directional_label = caption(WrapLabel("Eight measured directional values"))
         grid.addWidget(self.directional_label, len(ROWS) + 3, 0, 1, 3)
         grid.setColumnStretch(2, 1)
 
@@ -116,9 +125,7 @@ class CalibrationPanel(QtWidgets.QWidget):
 
         self.message = MessageLabel("Calibration message")
 
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(SPACE_S + 2)
+        layout = self.card_layout()
         head = QtWidgets.QHBoxLayout()
         head.addWidget(heading("Calibration result"), 1)
         head.addWidget(self.details_toggle)
@@ -175,21 +182,21 @@ class CalibrationPanel(QtWidgets.QWidget):
                 self.file_labels[key].setText(f"{getattr(calibration.firmware, key):.6f}")
             self.diagram.set_values(calibration.directional)
             if calibration.directional is not None:
-                self.directional_label.show_message("Measured: " + "  ".join(
+                self.directional_label.setText("Measured: " + "  ".join(
                     f"{label} {value:.3f}"
                     for label, value in zip(DIRECTION_LABELS, calibration.directional)))
                 self.message.show_message("")
             else:
-                self.directional_label.show_message("")
+                self.directional_label.setText("")
                 self.message.show_message(
                     "The file has no usable directionalScalars; only the four "
-                    "scalars are shown.")
+                    "scalars are shown.", kind="warning")
         else:
             self.mtime_label.setText("Modified: " + NO_VALUE)
             for label in self.file_labels.values():
                 label.setText(NO_VALUE)
             self.diagram.set_values(None)
-            self.directional_label.show_message("")
+            self.directional_label.setText("")
             if error:
                 self.message.show_message(error, error=True)
             else:

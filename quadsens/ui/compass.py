@@ -7,7 +7,9 @@ from collections.abc import Sequence
 
 from ..calibration import DIRECTION_LABELS
 from ..model import Scalars, format_deviation
+from . import theme
 from .qt import QtCore, QtGui, QtWidgets
+from .status import FONT_CAPTION
 
 # (name, unit vector on screen) in the order of Scalars: right, left, down, up.
 ARROWS: tuple[tuple[str, tuple[int, int]], ...] = (
@@ -73,42 +75,47 @@ class DirectionDiagram(QtWidgets.QWidget):
     def paintEvent(self, _event: QtGui.QPaintEvent) -> None:  # noqa: N802 (Qt name)
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-        palette = self.palette()
-        text_color = palette.color(QtGui.QPalette.ColorRole.WindowText)
-        accent = palette.color(QtGui.QPalette.ColorRole.Highlight)
-        faint = QtGui.QColor(text_color)
-        faint.setAlphaF(0.35)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing)
+        text_color, muted = theme.color("text"), theme.color("muted")
+        accent, ring = theme.color("accent"), theme.color("outline")
+        soft = QtGui.QColor(ring)
+        soft.setAlphaF(0.45)
 
-        font = painter.font()
-        bold = QtGui.QFont(font)
-        bold.setBold(True)
-        metrics = QtGui.QFontMetricsF(bold)
-        line = metrics.height()
+        # Typographic hierarchy: the value carries the weight, name and percent are captions.
+        value_font = QtGui.QFont(painter.font())
+        value_font.setWeight(QtGui.QFont.Weight.DemiBold)
+        small = QtGui.QFont(painter.font())
+        small.setPointSizeF(small.pointSizeF() * FONT_CAPTION)
+        value_metrics = QtGui.QFontMetricsF(value_font)
+        small_metrics = QtGui.QFontMetricsF(small)
+        line = value_metrics.height()
 
         if self._scalars is None and self._values is None:
-            painter.setPen(text_color)
+            painter.setPen(muted)
             painter.drawText(QtCore.QRectF(self.rect()),
                              int(QtCore.Qt.AlignmentFlag.AlignCenter), "No result yet")
             painter.end()
             return
 
-        side = metrics.horizontalAdvance("+00.0 %") + 8   # label column left and right
+        side = max(value_metrics.horizontalAdvance("0.0000"),
+                   small_metrics.horizontalAdvance("+00.0 %")) + 6
         center = QtCore.QPointF(self.width() / 2, self.height() / 2)
-        outer = max(14.0, min(self.width() / 2 - side - 4, self.height() / 2 - line - 6))
+        outer = max(14.0, min(self.width() / 2 - side - 6, self.height() / 2 - line - 8))
         inner = outer * 0.2
         known = list(self._values or ()) + list(
             self._scalars.as_tuple() if self._scalars is not None else ())
-        low = min(0.9, min(known)) - 0.01
-        high = max(1.1, max(known)) + 0.01
+        low = min(0.97, min(known)) - 0.005
+        high = max(1.03, max(known)) + 0.005
 
         def radius(value: float) -> float:
             return inner + (value - low) / (high - low) * (outer - inner)
 
-        # Reference: outer ring and the dashed ring at 1.0.
+        # Reference: a soft outer ring and the dashed ring at 1.0.
         painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-        painter.setPen(QtGui.QPen(faint, 1))
+        painter.setPen(QtGui.QPen(soft, 1))
         painter.drawEllipse(center, outer, outer)
-        painter.setPen(QtGui.QPen(text_color, 1, QtCore.Qt.PenStyle.DashLine))
+        dashed = QtGui.QPen(ring, 1.2, QtCore.Qt.PenStyle.DashLine)
+        painter.setPen(dashed)
         painter.drawEllipse(center, radius(1.0), radius(1.0))
 
         # Secondary: outline of the eight measured values.
@@ -118,12 +125,15 @@ class DirectionDiagram(QtWidgets.QWidget):
                 angle = math.radians(45 * index)
                 points.append(QtCore.QPointF(center.x() + radius(value) * math.cos(angle),
                                              center.y() - radius(value) * math.sin(angle)))
-            fill = QtGui.QColor(text_color)
-            fill.setAlphaF(0.08)
-            painter.setPen(QtGui.QPen(faint, 1))
+            fill = QtGui.QColor(accent)
+            fill.setAlphaF(0.10)
+            edge = QtGui.QColor(muted)
+            edge.setAlphaF(0.7)
+            painter.setPen(QtGui.QPen(edge, 1))
             painter.setBrush(fill)
             painter.drawPolygon(QtGui.QPolygonF(points))
-            painter.setBrush(faint)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(edge)
             for point in points:
                 painter.drawEllipse(point, 1.8, 1.8)
 
@@ -144,36 +154,40 @@ class DirectionDiagram(QtWidgets.QWidget):
                     QtCore.QPointF(base.x() - dy * head * 0.6, base.y() + dx * head * 0.6),
                     QtCore.QPointF(base.x() + dy * head * 0.6, base.y() - dx * head * 0.6)]))
 
-                painter.setPen(text_color)
                 deviation = format_deviation(value)
+                number = f"{value:.4f}"
+                vcenter = QtCore.Qt.AlignmentFlag.AlignVCenter
                 if dx:  # beside the ring: name, value, deviation stacked
-                    rect = QtCore.QRectF(0, 0, side, line * 3)
-                    x = center.x() + dx * (outer + 4) + (0 if dx > 0 else -side)
-                    rect.moveTopLeft(QtCore.QPointF(x, center.y() - line * 1.5))
+                    x = center.x() + dx * (outer + 6) + (0 if dx > 0 else -side)
+                    top = center.y() - line * 1.5
                     align = (QtCore.Qt.AlignmentFlag.AlignLeft if dx > 0
                              else QtCore.Qt.AlignmentFlag.AlignRight)
-                    painter.setFont(bold)
-                    painter.drawText(QtCore.QRectF(rect.x(), rect.y(), side, line),
-                                     int(align | QtCore.Qt.AlignmentFlag.AlignVCenter), name)
-                    painter.setFont(font)
-                    painter.drawText(QtCore.QRectF(rect.x(), rect.y() + line, side, line),
-                                     int(align | QtCore.Qt.AlignmentFlag.AlignVCenter),
-                                     f"{value:.4f}")
-                    painter.drawText(QtCore.QRectF(rect.x(), rect.y() + 2 * line, side, line),
-                                     int(align | QtCore.Qt.AlignmentFlag.AlignVCenter),
-                                     deviation)
+                    painter.setFont(small)
+                    painter.setPen(muted)
+                    painter.drawText(QtCore.QRectF(x, top, side, line),
+                                     int(align | vcenter), name)
+                    painter.drawText(QtCore.QRectF(x, top + 2 * line, side, line),
+                                     int(align | vcenter), deviation)
+                    painter.setFont(value_font)
+                    painter.setPen(text_color)
+                    painter.drawText(QtCore.QRectF(x, top + line, side, line),
+                                     int(align | vcenter), number)
                 else:   # above and below: one line
-                    rest = f"  {value:.4f}  {deviation}"
-                    name_w = metrics.horizontalAdvance(name)
-                    total = name_w + QtGui.QFontMetricsF(font).horizontalAdvance(rest)
-                    y = center.y() + dy * (outer + 4) - (line if dy < 0 else 0)
-                    x = center.x() - total / 2
-                    painter.setFont(bold)
-                    painter.drawText(QtCore.QRectF(x, y, name_w + 1, line),
-                                     int(QtCore.Qt.AlignmentFlag.AlignVCenter), name)
-                    painter.setFont(font)
-                    painter.drawText(QtCore.QRectF(x + name_w, y, total - name_w + 2, line),
-                                     int(QtCore.Qt.AlignmentFlag.AlignVCenter), rest)
+                    gap = small_metrics.horizontalAdvance("  ")
+                    widths = (small_metrics.horizontalAdvance(name),
+                              value_metrics.horizontalAdvance(number),
+                              small_metrics.horizontalAdvance(deviation))
+                    y = center.y() + dy * (outer + 6) - (line if dy < 0 else 0)
+                    x = center.x() - (sum(widths) + 2 * gap) / 2
+                    for width, font, pen, piece in (
+                            (widths[0], small, muted, name),
+                            (widths[1], value_font, text_color, number),
+                            (widths[2], small, muted, deviation)):
+                        painter.setFont(font)
+                        painter.setPen(pen)
+                        painter.drawText(QtCore.QRectF(x, y, width + 2, line),
+                                         int(vcenter), piece)
+                        x += width + gap
             painter.setPen(QtCore.Qt.PenStyle.NoPen)
             painter.setBrush(text_color)
             painter.drawEllipse(center, 3.0, 3.0)

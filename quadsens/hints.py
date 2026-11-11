@@ -109,13 +109,13 @@ def save_state_text(state: SaveState, tool_found: bool = True) -> str:
     if state is SaveState.SAVED:
         return "✓ Saved to config."
     if not tool_found:
-        return f"Cannot save: {TOOL_NAME} not found ({SETUP_HELP})."
+        return f"⚠ Cannot save: {TOOL_NAME} not found ({SETUP_HELP})."
     if state is SaveState.DIFFERS:
-        return "Applied, not saved: lost on module reload."
+        return "⚠ Applied, not saved: lost on module reload."
     if state is SaveState.MISSING_KEYS:
-        return "Not saved: the config has no directional values."
+        return "⚠ Not saved: the config has no directional values."
     if state is SaveState.NO_CONFIG:
-        return "Not saved: there is no readable config file yet."
+        return "⚠ Not saved: there is no readable config file yet."
     return "Saved state unknown (driver values not readable)."
 
 
