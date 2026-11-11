@@ -472,7 +472,7 @@ class _DemoUsbip:
         if args[:1] == ["-t"]:
             self.port, args = int(args[1]), args[2:]
         if args == ["--version"]:
-            return 0, "0.9.7.7\n"
+            return 0, "0.9.8.1\n"
         if args[:1] == ["attach"] and "--stop" not in args:
             self.client = Client("127.0.0.1", self.port)
             self.client.import_device(args[args.index("-b") + 1])
@@ -497,7 +497,8 @@ def windows_render(output: Path, mode: str, size: tuple[int, int] = (900, 720),
     captured from it and taken as multipliers, before Apply. With ``missing``:
     usbip-win2 is not installed and the values come from an imported file.
     """
-    from quadsens import values_file
+    from quadsens import values_file, win_install
+    from quadsens.ui.tools_strip import RawAccelInfo
     from quadsens.ui.windows_window import WindowsMainWindow
     from quadsens.usbip_client import UsbipClient
     from quadsens.usbip_mouse import VirtualMouse
@@ -531,12 +532,21 @@ def windows_render(output: Path, mode: str, size: tuple[int, int] = (900, 720),
             {"USERPROFILE": str(Path(tmp, "profile")), "SystemDrive": str(Path(tmp, "nodrive"))},
             find_client=lambda: UsbipClient(tool, usbip),
             mouse_factory=lambda pid: VirtualMouse(
-                UsbipClient(tool, usbip), VirtualMouseServer(pid, port=0)))
+                UsbipClient(tool, usbip), VirtualMouseServer(pid, port=0)),
+            # Nothing of the render asks the network or looks at this machine.
+            driver_state=lambda installed_at: (
+                win_install.DRIVER_MISSING if missing else win_install.DRIVER_READY),
+            latest_release=None)
         window.resize(*size)
         window.show()
         window.rawaccel_panel.set_folder("C:\\Tools\\RawAccel", remember=False)
         window.rawaccel_panel.folder = folder      # shown as a Windows path, read from here
         window.rawaccel_panel.reload()
+        # The strip names the folder as the user would see it, not the stand-in.
+        window.tools_strip._rawaccel_info = lambda: RawAccelInfo(
+            "" if missing else "C:\\Tools\\RawAccel", "" if missing else "1.7.1",
+            win_install.DRIVER_MISSING if missing else win_install.DRIVER_READY)
+        window.tools_strip.refresh_rawaccel()
         if missing:
             assert window.import_values(str(values))
             window.calibration_panel.message.show_message(

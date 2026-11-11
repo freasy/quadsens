@@ -1,8 +1,9 @@
 """Drive usbip-win2, the USB/IP client driver for Windows (no Qt).
 
-usbip-win2 (https://github.com/vadimgrn/usbip-win2) is installed by the user;
-QuadSens never downloads or installs it. Its command line tool usbip.exe
-attaches the device that quadsens.usbip_server exports.
+usbip-win2 (https://github.com/vadimgrn/usbip-win2) is installed by the user,
+by hand or through the install dialog of QuadSens (quadsens.win_install).
+Its command line tool usbip.exe attaches the device that
+quadsens.usbip_server exports.
 
 Confirmed in the usbip-win2 sources and README (userspace/usbip/usbip.cpp,
 attach.cpp, detach.cpp, port.cpp, README.md; master branch):

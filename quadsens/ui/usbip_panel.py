@@ -1,4 +1,4 @@
-"""The "Virtual mouse" card on Windows, and the check for the USB/IP driver.
+"""The "Virtual mouse" card on Windows.
 
 The card is the Linux one (status, collapsed protocol log, last-event line,
 Copy and Clear) with another transport underneath: instead of /dev/uhid it
@@ -15,9 +15,8 @@ from ..emulator import VENDOR_ID
 from ..usbip_mouse import VirtualMouse
 from ..usbip_server import format_event
 from .mouse_panel import MousePanel
-from .qt import QtCore, QtWidgets, Signal
-from .status import SPACE_M, SPACE_S, ElideLabel, StatusDot, WrapLabel, caption
-from .theme import set_primary
+from .qt import QtCore, QtWidgets
+from .status import StatusDot
 
 MouseFactory = Callable[[int], VirtualMouse]
 POLL_MS = 100
@@ -154,95 +153,3 @@ class UsbipMousePanel(MousePanel):
             self.dot.set_state(StatusDot.OFF)
         self.status_label.setText(text)
         self.status_label.setToolTip(text)
-
-
-class UsbipCheckStrip(QtWidgets.QFrame):
-    """First line of the Windows window: is the USB/IP driver there?
-
-    One quiet line when it is. Otherwise it says that usbip-win2 is missing,
-    what its installer does, that importing or typing values works without it,
-    and offers a button that opens its releases page in the browser. QuadSens
-    does not download or install it.
-    """
-
-    open_releases = Signal()
-    checked = Signal()
-
-    def __init__(self, find_client: Callable[[], usbip_client.UsbipClient],
-                 parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._find_client = find_client
-        self.found = False
-        self.version = ""
-        self.mark = QtWidgets.QLabel()
-        self.mark.setObjectName("bannerMark")
-        font = self.mark.font()
-        font.setBold(True)
-        self.mark.setFont(font)
-        self.mark.setFixedWidth(self.mark.fontMetrics().horizontalAdvance("⚠") + 4)
-        self.mark.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.headline = ElideLabel()
-        bold = self.headline.font()
-        bold.setWeight(bold.Weight.DemiBold)
-        self.headline.setFont(bold)
-        self.detail = caption(WrapLabel("About the USB/IP driver"))
-        self.get_button = QtWidgets.QPushButton("Get usbip-win&2…")
-        self.get_button.setToolTip(
-            "Open the download page of usbip-win2 in your browser. You install it "
-            "yourself; its installer needs administrator rights.")
-        self.get_button.setAccessibleDescription(self.get_button.toolTip())
-        self.get_button.clicked.connect(self.open_releases.emit)
-        self.recheck_button = QtWidgets.QToolButton()
-        self.recheck_button.setText("Chec&k again")
-        self.recheck_button.setAutoRaise(True)
-        self.recheck_button.setFocusPolicy(QtCore.Qt.FocusPolicy.TabFocus)
-        self.recheck_button.setAccessibleName("Check for the USB/IP driver again")
-        self.recheck_button.setToolTip("Look for usbip-win2 again")
-        self.recheck_button.setAccessibleDescription(self.recheck_button.toolTip())
-        self.recheck_button.clicked.connect(self.check)
-        top = QtWidgets.QHBoxLayout()
-        top.setSpacing(SPACE_M)
-        top.addWidget(self.mark)
-        top.addWidget(self.headline, 1)
-        top.addWidget(self.get_button)
-        top.addWidget(self.recheck_button)
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setSpacing(0)
-        layout.addLayout(top)
-        layout.addWidget(self.detail)
-        self.setProperty("banner", "")
-        self.check()
-
-    def check(self) -> None:
-        client = self._find_client()
-        self.found = client.installed
-        self.version = client.version() if client.installed else ""
-        if self.found:
-            self.mark.setText("✓")
-            self.headline.setText("USB/IP driver found (usbip-win2%s)"
-                                  % (" " + self.version if self.version else ""))
-            self.detail.setText("")
-        else:
-            self.mark.setText("✕")
-            self.headline.setText("usbip-win2 is not installed")
-            self.detail.setText(
-                "The virtual mouse needs this USB/IP driver (its usbip.exe was not found). "
-                "You install it yourself; its installer asks for administrator rights and "
-                "restarts the USB hubs for a moment. Without it you can still import or "
-                "type the values and apply them.")
-        self.detail.setVisible(not self.found)
-        self.get_button.setVisible(not self.found)
-        set_primary(self.get_button, False)
-        self.layout().setContentsMargins(*((SPACE_S, 0, 0, 0) if self.found
-                                           else (SPACE_M, 3, SPACE_M, 4)))
-        self.setAccessibleName("USB/IP driver check: %s. %s %s" % (
-            "passed" if self.found else "needs attention", self.headline.text(),
-            self.detail.text()))
-        banner = "" if self.found else "warning"
-        if self.property("banner") != banner:
-            self.setProperty("banner", banner)
-            style = self.style()
-            style.unpolish(self)
-            style.polish(self)
-            self.update()
-        self.checked.emit()

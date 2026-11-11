@@ -27,14 +27,25 @@ try:
 except ImportError:  # pragma: no cover - depends on the environment
     raise unittest.SkipTest("no Qt binding (PySide6) installed") from None
 
-from quadsens import emulator, rawaccel, usbip_client, usbip_mouse, usbip_server, values_file
+from quadsens import (
+    emulator,
+    rawaccel,
+    usbip_mouse,
+    usbip_server,
+    values_file,
+    win_install,
+)
 from quadsens.model import Scalars
 from quadsens.rawaccel import Four
+from quadsens import win_download, win_tools
+from quadsens.ui import tools_strip
 from quadsens.ui.windows_window import WindowsMainWindow
+from quadsens.win_tools import RAWACCEL, USBIP
 from quadsens.usbip_client import UsbipClient
 from quadsens.usbip_server import VirtualMouseServer
 from tests import widths
 from tests.test_usbip_windows import TOOL, FakeDriver, occupy_port
+from tests.test_win_tools import GOOD, FakeWindows, make_zip, pin_for, zip_pin
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -62,6 +73,10 @@ class WindowCase(unittest.TestCase):
         self.pattern = str(self.tmp / "profile" / "Users" / "*" / "ASFData" / "*"
                            / "ASFSettings.json")
         self.windows: list[WindowsMainWindow] = []
+        # The tools: nothing is installed, nothing is asked online, unless a test says so.
+        self.install_tools: win_install.Tools | None = None
+        self.driver_state = win_install.DRIVER_READY
+        self.latest_release = None
 
     def tearDown(self) -> None:
         for window in self.windows:
@@ -97,10 +112,14 @@ class WindowCase(unittest.TestCase):
             self.mice.append(mouse)
             return mouse
 
-        window = WindowsMainWindow(settings, self.pattern,
-                                   {"USERPROFILE": str(self.tmp / "profile"),
-                                    "SystemDrive": str(self.tmp / "nodrive")},
-                                   find_client=find_client, mouse_factory=mouse_factory)
+        self.environ = {"USERPROFILE": str(self.tmp / "profile"),
+                        "SystemDrive": str(self.tmp / "nodrive"),
+                        "LOCALAPPDATA": str(self.tmp / "local")}
+        window = WindowsMainWindow(settings, self.pattern, self.environ,
+                                   find_client=find_client, mouse_factory=mouse_factory,
+                                   install_tools=self.install_tools,
+                                   driver_state=lambda installed_at: self.driver_state,
+                                   latest_release=self.latest_release)
         window.opened: list[str] = []
         window.open_url = lambda url: window.opened.append(url.toString())
         self.windows.append(window)
@@ -460,9 +479,9 @@ class VirtualMouseWindowTest(WindowCase):
     def commands(self) -> list[str]:
         return self.driver.commands()
 
-    def test_strip_says_what_is_missing_and_opens_the_releases_page(self) -> None:
+    def test_strip_says_what_is_missing_and_what_was_found(self) -> None:
         window = self.make()
-        strip = window.usbip_strip
+        strip = window.tools_strip
         self.assertFalse(strip.found)
         self.assertEqual((strip.mark.text(), strip.headline.text()),
                          ("✕", "usbip-win2 is not installed"))
@@ -471,17 +490,16 @@ class VirtualMouseWindowTest(WindowCase):
         self.assertIn("still import or type", strip.detail.text())
         self.assertIn("needs attention", strip.accessibleName())
         self.assertFalse(strip.get_button.isHidden())
-        strip.get_button.click()
-        self.assertEqual(window.opened, [usbip_client.RELEASES_URL])
-        self.assertTrue(usbip_client.RELEASES_URL.startswith("https://github.com/"))
+        self.assertEqual(strip.get_button.text(), "Install USB/IP driver…")
         self.assertEqual(self.commands(), [])            # nothing was run, nothing fetched
         self.assertEqual(self.statuses(window), "○✓○▶○")  # the mouse steps are set aside
 
         self.tool = TOOL                                  # the user installed it
+        self.driver.version = "0.9.8.1"
         strip.recheck_button.click()
         self.assertTrue(strip.found)
         self.assertEqual((strip.mark.text(), strip.headline.text()),
-                         ("✓", "USB/IP driver found (usbip-win2 0.9.7.7)"))
+                         ("✓", "USB/IP driver found (usbip-win2 0.9.8.1)"))
         self.assertTrue(strip.get_button.isHidden())
         self.assertTrue(strip.detail.isHidden())
         self.assertIn("passed", strip.accessibleName())
@@ -721,6 +739,275 @@ class VirtualMouseWindowTest(WindowCase):
         self.assertEqual(self.commands(), [])
 
 
+class ToolsTest(WindowCase):
+    """Installing the two tools and the notice about newer versions, with stand-ins."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.folder / "writer.exe").unlink()
+        self.archive = make_zip(self.tmp / "ra.zip", GOOD)
+        self.exe = b"MZ signed installer"
+        pins = {USBIP: pin_for(self.exe), RAWACCEL: zip_pin(GOOD, self.archive)}
+        original = dict(win_tools.PINS)
+        win_tools.PINS.update(pins)
+        self.addCleanup(win_tools.PINS.update, original)
+        self.fake = FakeWindows(self.tmp, {pins[USBIP].asset: self.exe,
+                                           pins[RAWACCEL].asset: self.archive.read_bytes()})
+        self.install_tools = self.fake.tools()
+
+    def tearDown(self) -> None:
+        for window in self.windows:
+            if window.install_dialog is not None:
+                window.install_dialog.wait()
+                window.install_dialog.close()
+        super().tearDown()
+
+    def run_dialog(self, window: WindowsMainWindow) -> win_install.Result:
+        dialog = window.install_dialog
+        assert dialog is not None
+        dialog.start_button.click()
+        result = dialog.wait()
+        assert result is not None
+        _app.processEvents()
+        return result
+
+    def test_lines_for_every_state(self) -> None:
+        self.assertEqual(tools_strip.usbip_line(False, ""),
+                         ("✕", "usbip-win2 is not installed", "Install USB/IP driver…"))
+        pinned = win_tools.PINS[USBIP].version
+        self.assertEqual(tools_strip.usbip_line(True, pinned),
+                         ("✓", "USB/IP driver found (usbip-win2 %s)" % pinned, ""))
+        mark, text, button = tools_strip.usbip_line(True, "0.9.7.7")
+        self.assertEqual((mark, button), ("⚠", "Install tested version…"))
+        self.assertIn("tested with " + pinned, text)
+        mark, text, button = tools_strip.usbip_line(True, "0.9.9.0")
+        self.assertEqual((mark, button), ("✓", ""))
+        self.assertIn("newer than", text)
+        self.assertEqual(tools_strip.usbip_line(True, "")[::2], ("✓", ""))
+
+        info, line = tools_strip.RawAccelInfo, tools_strip.rawaccel_line
+        self.assertEqual(line(info())[::2], ("✕", "Install RawAccel…"))
+        mark, text, button = line(info("C:\\RA", "1.7.1", win_install.DRIVER_MISSING))
+        self.assertEqual((mark, button), ("⚠", "Install RawAccel…"))
+        self.assertIn("driver is not installed", text)
+        mark, text, button = line(info("C:\\RA", "1.7.1", win_install.DRIVER_PENDING))
+        self.assertEqual((mark, button), ("⚠", ""))
+        self.assertIn("restart Windows", text)
+        self.assertIn("Apply works after that", text)
+        self.assertEqual(line(info("C:\\RA", "1.7.1", win_install.DRIVER_READY)),
+                         ("✓", "RawAccel 1.7.1 found in C:\\RA", ""))
+        mark, text, button = line(info("C:\\RA", "1.7.1", win_install.DRIVER_UNKNOWN))
+        self.assertEqual((mark, button), ("✓", ""))
+        self.assertIn("is not known", text)            # said, not guessed
+        mark, text, button = line(info("C:\\RA", "1.6.1", win_install.DRIVER_READY))
+        self.assertEqual((mark, button), ("⚠", "Install tested version…"))
+        self.assertEqual(line(info("C:\\RA", "1.9.0", win_install.DRIVER_READY))[2], "")
+        self.assertEqual(line(info("C:\\RA", "", win_install.DRIVER_READY))[::2], ("✓", ""))
+        mark, text, button = line(info("", "", win_install.DRIVER_READY))
+        self.assertEqual((mark, button), ("⚠", ""))
+        self.assertIn("choose the folder", text)
+
+    def test_installing_the_usb_ip_driver(self) -> None:
+        window = self.make()
+        strip = window.tools_strip
+        self.assertEqual(self.statuses(window), "○✓○▶○")
+        strip.get_button.click()
+        dialog = window.install_dialog
+        assert dialog is not None
+        # Asked first: nothing was fetched or started by opening the dialog.
+        self.assertEqual(self.fake.launched, [])
+        self.assertFalse((self.tmp / "cache").exists())
+        text = dialog.what_label.text()
+        for words in ("administrator rights", "USB devices can disconnect", "checksum"):
+            self.assertIn(words, text)
+        self.assertIn(win_tools.PINS[USBIP].sha256, dialog.source_label.text())
+        self.assertIn("install it yourself", dialog.source_label.text())
+        self.assertTrue(dialog.folder_edit.isHidden())
+
+        def installed(path: str, folder: str) -> win_install.Launch:
+            self.tool = TOOL                     # what the installer brings
+            self.driver.version = "0.9.8.1"
+            return win_install.Launch(win_install.FINISHED, 0)
+        self.install_tools.launch = installed
+        result = self.run_dialog(window)
+        self.assertEqual(result.kind, win_install.DONE)
+        self.assertTrue(dialog.message.text().startswith("✓ usbip-win2 0.9.8.1 is installed"))
+        self.assertEqual(dialog.cancel_button.text(), "&Close")
+        self.assertFalse(dialog.start_button.isEnabled())
+        # The window looked again by itself.
+        self.assertEqual(strip.headline.text(), "USB/IP driver found (usbip-win2 0.9.8.1)")
+        self.assertEqual(self.statuses(window), "▶✓○○○")
+        dialog.cancel_button.click()
+        self.assertFalse(dialog.isVisible())
+
+    def test_declined_administrator_prompt_changes_nothing(self) -> None:
+        window = self.make()
+        window.tools_strip.get_button.click()
+        self.fake.launch_result = win_install.Launch(win_install.DECLINED)
+        result = self.run_dialog(window)
+        dialog = window.install_dialog
+        assert dialog is not None
+        self.assertEqual(result.kind, win_install.REFUSED)
+        self.assertIn("was declined", dialog.message.text())
+        self.assertFalse(dialog.message.is_error)
+        self.assertEqual(dialog.start_button.text(), "Try &again")
+        self.assertTrue(dialog.start_button.isEnabled())
+        self.assertEqual(window.tools_strip.headline.text(), "usbip-win2 is not installed")
+
+    def test_a_download_that_does_not_verify_is_an_error_and_nothing_starts(self) -> None:
+        window = self.make()
+        window.tools_strip.get_button.click()
+        self.fake.download_error = win_download.DownloadError(
+            win_download.HASH, "The downloaded file is not the one QuadSens was tested "
+                               "with. It was deleted and nothing was run.")
+        self.run_dialog(window)
+        dialog = window.install_dialog
+        assert dialog is not None
+        self.assertTrue(dialog.message.is_error)
+        self.assertIn("nothing was run", dialog.message.text())
+        self.assertEqual(self.fake.launched, [])
+
+    def test_installing_rawaccel_ends_at_the_restart(self) -> None:
+        self.driver_state = win_install.DRIVER_MISSING
+        window = self.make(choose=False)
+        strip = window.tools_strip
+        self.assertEqual(strip.raw.headline.text(),
+                         "RawAccel is not installed, or its folder is not chosen")
+        self.assertFalse(strip.choose_button.isHidden())
+        strip.raw.install_button.click()
+        dialog = window.install_dialog
+        assert dialog is not None
+        self.assertFalse(dialog.folder_edit.isHidden())
+        self.assertIn("Programs", dialog.folder_edit.text())       # the default place
+        self.assertIn("RawAccel", dialog.folder_edit.text())
+        for words in ("not signed", "after the computer was restarted", "does not restart"):
+            self.assertIn(words, dialog.what_label.text())
+
+        # A folder with other things in it is refused before anything is fetched.
+        dialog.folder_edit.setText(str(self.tmp))
+        dialog.start_button.click()
+        self.assertIn("other files", dialog.message.text())
+        self.assertFalse(dialog.is_busy())
+        self.assertFalse((self.tmp / "cache").exists())
+
+        target = self.tmp / "Programs" / "RawAccel"
+        dialog.folder_edit.setText(str(target))
+
+        started: list[tuple[str, str]] = []
+
+        def installed(path: str, folder: str) -> win_install.Launch:
+            started.append((path, folder))
+            self.driver_state = win_install.DRIVER_PENDING      # the driver file is there
+            return win_install.Launch(win_install.FINISHED, 0)
+        self.install_tools.launch = installed
+        result = self.run_dialog(window)
+        self.assertEqual(result.kind, win_install.DONE)
+        self.assertIn("Restart the computer", dialog.message.text())
+        self.assertTrue((target / "installer.exe").is_file())
+        # The folder is the RawAccel folder from now on, and the strip names the restart.
+        self.assertEqual(window.rawaccel_panel.folder, target)
+        self.assertIn("restart Windows to finish installing its driver",
+                      strip.raw.headline.text())
+        self.assertEqual(strip.raw.mark.text(), "⚠")
+        self.assertTrue(strip.raw.install_button.isHidden())
+        self.assertTrue(strip.choose_button.isHidden())
+        self.assertIsNotNone(window._settings.value("tools/rawaccel_installed_at"))
+        # QuadSens never restarts the computer: nothing but the installer was started,
+        # from its own folder.
+        self.assertEqual(started, [(str(target / "installer.exe"), str(target))])
+
+    def test_choosing_an_existing_folder_from_the_strip(self) -> None:
+        window = self.make(choose=False)
+        chosen: list[str] = []
+        window.rawaccel_panel.choose_folder = lambda folder="": chosen.append(folder)
+        window.tools_strip.choose_button.click()
+        self.assertEqual(chosen, [""])
+        self.assertIsNone(window.install_dialog)
+
+    def test_newer_release_is_a_quiet_notice_with_a_link(self) -> None:
+        asked: list[str] = []
+
+        def latest(pin: win_tools.Pin):
+            asked.append(pin.key)
+            if pin.key == RAWACCEL:
+                return win_download.Latest(
+                    "v1.8.0", "https://github.com/RawAccelOfficial/rawaccel/releases/tag/v1.8.0")
+            return win_download.Latest(pin.tag, pin.release_url)      # nothing newer
+        self.latest_release = latest
+        window = self.make()
+        strip = window.tools_strip
+        self.assertTrue(self.until(window, lambda: not strip.notice_label.isHidden()))
+        self.assertEqual(sorted(asked), sorted([USBIP, RAWACCEL]))
+        self.assertEqual(strip.notice_label.text(),
+                         "A newer RawAccel 1.8.0 is available; QuadSens was tested with 1.7.1.")
+        self.assertFalse(strip.link_buttons[RAWACCEL].isHidden())
+        self.assertTrue(strip.link_buttons[USBIP].isHidden())
+        strip.link_buttons[RAWACCEL].click()
+        self.assertEqual(window.opened,
+                         ["https://github.com/RawAccelOfficial/rawaccel/releases/tag/v1.8.0"])
+        self.assertIsNone(window.install_dialog)          # a notice never installs
+        self.assertFalse((self.tmp / "cache").exists())
+        # Check again asks again; switching it off removes the notice and stays off.
+        asked.clear()
+        strip.recheck_button.click()
+        self.assertTrue(self.until(window, lambda: len(asked) == 2))
+        window.online_action.setChecked(False)
+        self.assertTrue(strip.notice_label.isHidden())
+        self.assertFalse(window._settings.value("tools/online_check", True, type=bool))
+        asked.clear()
+        self.assertFalse(window.check_online())
+        strip.recheck_button.click()
+        self.assertEqual(asked, [])
+        window.close()
+        again = self.make()
+        self.assertFalse(again.online_action.isChecked())
+        self.assertEqual(asked, [])
+
+    def test_offline_or_failing_check_is_silent(self) -> None:
+        def broken(pin: win_tools.Pin):
+            if pin.key == USBIP:
+                raise OSError("no network")
+            return None
+        self.latest_release = broken
+        window = self.make()
+        self.assertTrue(self.until(
+            window, lambda: window._online_thread is not None
+            and not window._online_thread.is_alive()))
+        window._take_online_results()
+        self.assertTrue(window.tools_strip.notice_label.isHidden())
+        self.assertFalse(window.calibration_panel.message.is_error)
+        self.assertFalse(window.mouse_panel.message.is_error)
+
+    def test_the_environment_can_switch_the_online_check_off(self) -> None:
+        asked: list[str] = []
+        self.latest_release = lambda pin: asked.append(pin.key)
+        window = self.make()
+        window.close()
+        self.assertTrue(self.until(window, lambda: len(asked) == 2))
+        asked.clear()
+        window._environ = dict(window._environ, QUADSENS_NO_ONLINE_CHECK="1")
+        self.assertFalse(window.online_check_enabled())
+        self.assertFalse(window.check_online())
+        self.assertEqual(asked, [])
+
+    def test_help_says_how_to_remove_and_what_goes_online(self) -> None:
+        window = self.make()
+        window.setup_help_action.trigger()
+        assert window.info_box is not None
+        text = window.info_box.text()
+        for words in ("Installed apps", "uninstaller.exe", "does not remove",
+                      "api.github.com", "install them yourself", "never restarts"):
+            self.assertIn(words, text)
+        window.info_box.close()
+        window.about_action.trigger()
+        assert window.info_box is not None
+        self.assertIn("api.github.com", window.info_box.text())
+        self.assertIn("Nothing else is sent", window.info_box.text())
+        window.info_box.close()
+        self.assertFalse(any("ninstall" in button.text() or "emove" in button.text()
+                             for button in window.findChildren(QtWidgets.QAbstractButton)))
+
+
 class ImportCleanlinessTest(unittest.TestCase):
     """The Windows path must not pull in anything that only exists on Linux."""
 
@@ -815,6 +1102,10 @@ class ImportCleanlinessTest(unittest.TestCase):
         linux = self.loaded("from quadsens.ui.main_window import MainWindow", "linux")
         self.assertIn("quadsens.emulator", linux)
         self.assertNotIn("quadsens.ui.rawaccel_panel", linux)
+        # Linux never fetches or installs anything: that code is not even loaded.
+        for name in ("quadsens.win_tools", "quadsens.win_download", "quadsens.win_install",
+                     "quadsens.ui.install_dialog", "quadsens.ui.tools_strip"):
+            self.assertNotIn(name, linux)
 
 
 if __name__ == "__main__":

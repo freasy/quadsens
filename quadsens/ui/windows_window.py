@@ -1,7 +1,8 @@
 """Main window on Windows: virtual mouse over USB/IP, values in, RawAccel out.
 
-The virtual mouse is served over USB/IP and attached through usbip-win2,
-which the user installs. Without it the window still does everything else:
+The virtual mouse is served over USB/IP and attached through usbip-win2.
+The first lines of the window say whether usbip-win2 and RawAccel are there
+and can install the tested versions, always after asking. Without usbip-win2 the window still does everything else:
 the multipliers can be imported or typed and applied to RawAccel. Nothing of
 the Linux chain (/dev/uhid, yeetmouse, pkexec, the driver installer) is
 imported here. The calibration card, the diagram, the stepper and the themes
@@ -12,10 +13,12 @@ from __future__ import annotations
 
 import html
 import os
+import queue
+import threading
 import time
 from collections.abc import Callable, Mapping
 
-from .. import about, usbip_client
+from .. import about, usbip_client, win_download, win_install, win_tools
 from ..calibration import NO_RESULT_FOLDER, result_folder
 from ..steps import (
     FIX_FOLDER,
@@ -37,9 +40,11 @@ from .rawaccel_panel import RawAccelPanel
 from .status import SPACE_L, SPACE_M
 from .steps_bar import StepsBar
 from .theme import ThemeManager, set_primary, stored_mode
-from .usbip_panel import UsbipCheckStrip, UsbipMousePanel
+from .install_dialog import ToolInstallDialog
+from .tools_strip import RawAccelInfo, ToolsStrip
+from .usbip_panel import UsbipMousePanel
 from .values_io import ValuesIO
-from .window_common import WindowCommon
+from .window_common import WindowCommon, about_html
 
 DEFAULT_SIZE = (900, 720)
 # Below the size at which everything fits, the page scrolls instead of being cut.
@@ -58,6 +63,12 @@ FIRST_STEPS_WINDOWS: tuple[str, ...] = (
     "Press Use result.",
     "Check the table (current and new RawAccel settings) and press Apply.",
 )
+ONLINE_NOTE = (
+    "When it starts, and on Check again, QuadSens asks api.github.com for the newest "
+    "release of usbip-win2 and of RawAccel, to tell you when one is newer than the "
+    "version it was tested with. Nothing else is sent and nothing is downloaded by "
+    "that. Help > Check for newer tool versions online switches it off. Files are "
+    "downloaded from github.com only when you start an installation.")
 WITHOUT_MOUSE = ("Without usbip-win2: import a values file exported by QuadSens on Linux "
                  "(File > Import values) or type the four multipliers, then Apply.")
 
@@ -67,7 +78,11 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
                  environ: Mapping[str, str] | None = None,
                  parent: QtWidgets.QWidget | None = None,
                  find_client: Callable[[], usbip_client.UsbipClient] | None = None,
-                 mouse_factory: Callable[[int], VirtualMouse] | None = None) -> None:
+                 mouse_factory: Callable[[int], VirtualMouse] | None = None,
+                 install_tools: win_install.Tools | None = None,
+                 driver_state: Callable[[float | None], str] | None = None,
+                 latest_release: Callable[[win_tools.Pin], win_download.Latest | None]
+                 | None = win_download.latest_release) -> None:
         super().__init__(parent)
         self._settings = settings
         self._calibration_glob = calibration_glob
@@ -90,13 +105,26 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
             # The server listens on this PC only (127.0.0.1); there is no setting for it.
             return VirtualMouse(self._find_client(), VirtualMouseServer(product_id))
 
-        self.usbip_strip = UsbipCheckStrip(self._find_client)
+        # Installing the tools: everything that touches Windows or the network
+        # can be replaced, which the tests do.
+        self._install_tools = install_tools
+        self._driver_state = driver_state or (
+            lambda installed_at: win_install.rawaccel_driver_state(
+                self._environ, win_install.boot_time(), installed_at))
+        self._latest_release = latest_release
+        self.install_dialog: ToolInstallDialog | None = None
+        self._online_thread: threading.Thread | None = None
+        self._online_results: queue.Queue[tuple[str, win_download.Latest | None]] = \
+            queue.Queue()
+
         self.steps_bar = StepsBar()
         self.steps_bar.all_done_text = WIN_ALL_DONE
         self.mouse_panel = UsbipMousePanel(mouse_factory or make_mouse, settings)
         self.calibration_panel = CalibrationPanel(calibration_glob, settings,
                                                   no_result_text=NO_RESULT_WINDOWS)
         self.rawaccel_panel = RawAccelPanel(settings, self.calibration_panel.result, environ)
+        self.tools_strip = ToolsStrip(self._find_client, self.rawaccel_info)
+        self.usbip_strip = self.tools_strip          # its first line is the USB/IP driver
         self.calibration_panel.set_flip_y(self.rawaccel_panel.flip())
 
         lower = QtWidgets.QHBoxLayout()
@@ -125,15 +153,22 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
         self.rawaccel_panel.flip_check.toggled.connect(self.calibration_panel.set_flip_y)
         self.steps_bar.action_requested.connect(self.run_step)
         self.steps_bar.fix_requested.connect(self.run_fix)
-        self.usbip_strip.open_releases.connect(
-            lambda: self.open_url(QtCore.QUrl(usbip_client.RELEASES_URL)))
-        self.usbip_strip.checked.connect(self.update_steps)
+        self.tools_strip.install_requested.connect(self.install_tool)
+        self.tools_strip.choose_folder_requested.connect(
+            lambda: self.rawaccel_panel.choose_folder())
+        self.tools_strip.link_requested.connect(lambda url: self.open_url(QtCore.QUrl(url)))
+        self.tools_strip.checked.connect(self.update_steps)
+        self.tools_strip.recheck_button.clicked.connect(self.check_online)
+        self.rawaccel_panel.changed.connect(self._rawaccel_changed)
+        self._online_timer = QtCore.QTimer(self)
+        self._online_timer.setInterval(200)
+        self._online_timer.timeout.connect(self._take_online_results)
         self.mouse_panel.writes_changed.connect(self._writes_changed)
         self.mouse_panel.running_changed.connect(self._mouse_changed)
 
         panel = self.rawaccel_panel
         order: list[QtWidgets.QWidget] = [
-            self.usbip_strip.get_button, self.usbip_strip.recheck_button,
+            *self.tools_strip.buttons(),
             self.steps_bar.next_button,
             self.mouse_panel.toggle_button, self.mouse_panel.pid_combo,
             self.mouse_panel.log_toggle, self.mouse_panel.log_view,
@@ -149,6 +184,7 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
         self.tab_order = order
 
         self.update_steps()
+        self.check_online()
         self.steps_bar.next_button.setFocus()
         self.resize(*DEFAULT_SIZE)
         geometry = settings.value("window/geometry")
@@ -180,6 +216,15 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
             QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.HelpContents))
         self.steps_action.triggered.connect(self.show_first_steps)
         help_menu.addAction(self.steps_action)
+        self.setup_help_action = QtGui.QAction("&Setup help", self)
+        self.setup_help_action.triggered.connect(self.show_setup_help)
+        help_menu.addAction(self.setup_help_action)
+        self.online_action = QtGui.QAction("Check for newer tool versions &online", self)
+        self.online_action.setCheckable(True)
+        self.online_action.setChecked(self.online_check_enabled())
+        self.online_action.setToolTip(ONLINE_NOTE)
+        self.online_action.toggled.connect(self.set_online_check)
+        help_menu.addAction(self.online_action)
         help_menu.addSeparator()
         self.about_action = QtGui.QAction("&About %s" % about.APP_NAME, self)
         self.about_action.setMenuRole(QtGui.QAction.MenuRole.AboutRole)
@@ -194,6 +239,131 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
         self._open_box("First steps", "<h3>First steps</h3><ol>%s</ol><p>%s</p>" % (
             "".join("<li>%s</li>" % html.escape(step) for step in FIRST_STEPS_WINDOWS),
             html.escape(WITHOUT_MOUSE)))
+
+    def show_setup_help(self) -> None:
+        usbip, raw = win_tools.PINS[win_tools.USBIP], win_tools.PINS[win_tools.RAWACCEL]
+        self._open_box("Setup help", (
+            "<h3>The two tools</h3>"
+            "<p>The virtual mouse needs <b>usbip-win2</b> (tested: %s); applying needs "
+            "<b>RawAccel</b> (tested: %s). The first lines of the window say what was "
+            "found and can install the tested versions: the file is downloaded from the "
+            "project on GitHub, checked against a checksum built into QuadSens, and its "
+            "installer is started through the Windows administrator prompt. RawAccel "
+            "works only after a restart of the computer; QuadSens never restarts it.</p>"
+            "<p>You can also install them yourself from %s and %s, then press "
+            "<i>Check again</i> (for RawAccel: <i>Choose folder…</i>).</p>"
+            "<h3>How to remove them</h3><ul>%s</ul>"
+            "<h3>What goes online</h3><p>%s</p>") % (
+                html.escape(usbip.version), html.escape(raw.version),
+                html.escape(usbip.releases_url), html.escape(raw.releases_url),
+                "".join("<li>%s</li>" % html.escape(line) for line in win_tools.HOW_TO_REMOVE),
+                html.escape(ONLINE_NOTE)))
+
+    def show_about(self) -> None:
+        self._open_box("About %s" % about.APP_NAME,
+                       about_html() + "<p>%s</p>" % html.escape(ONLINE_NOTE))
+
+    # ---- the tools: what is there, installing, newer versions ---------------------
+
+    def rawaccel_info(self) -> RawAccelInfo:
+        panel = self.rawaccel_panel
+        folder = str(panel.folder) if panel.folder is not None else ""
+        stored = self._settings.value("tools/rawaccel_installed_at")
+        try:
+            installed_at = float(stored) if stored is not None else None
+        except (TypeError, ValueError):
+            installed_at = None
+        return RawAccelInfo(folder, win_install.rawaccel_version(folder) if folder else "",
+                            self._driver_state(installed_at))
+
+    def _rawaccel_changed(self) -> None:
+        panel = self.rawaccel_panel
+        folder = str(panel.folder) if panel.folder is not None else ""
+        if folder != self.tools_strip.rawaccel.folder:
+            self.tools_strip.refresh_rawaccel()
+
+    def install_tool(self, key: str) -> None:
+        """Open the install dialog for a tool. Nothing happens before its button."""
+        folder = ""
+        if key == win_tools.RAWACCEL:
+            panel = self.rawaccel_panel
+            folder = str(panel.folder) if panel.folder is not None \
+                else win_install.default_rawaccel_folder(self._environ)
+        dialog = ToolInstallDialog(key, self._run_install, folder, self)
+        dialog.finished_install.connect(lambda result, k=key: self._installed(k, result))
+        self.install_dialog = dialog
+        dialog.open()
+
+    def _run_install(self, key: str, folder: str, say: Callable[[str], None],
+                     progress: Callable[[int, int], None],
+                     cancelled: Callable[[], bool]) -> win_install.Result:
+        """Runs in the dialog's thread."""
+        tools = self._install_tools or win_install.Tools(
+            cache=lambda: win_download.cache_dir(self._environ),
+            signature=lambda path, signer: win_install.signature_state(
+                path, signer, self._environ))
+        if key == win_tools.USBIP:
+            return win_install.install_usbip(
+                tools, say, progress, cancelled, detect=lambda: self._find_client().version())
+        return win_install.install_rawaccel(
+            folder, tools, say, progress, cancelled,
+            driver_state=lambda: self._driver_state(time.time()))
+
+    def _installed(self, key: str, result: win_install.Result) -> None:
+        if key == win_tools.RAWACCEL and result.folder:
+            if result.kind == win_install.DONE:
+                self._settings.setValue("tools/rawaccel_installed_at", time.time())
+            self.rawaccel_panel.choose_folder(result.folder)
+        self.tools_strip.check()
+
+    def online_check_enabled(self) -> bool:
+        if self._environ.get("QUADSENS_NO_ONLINE_CHECK"):
+            return False
+        return bool(self._settings.value("tools/online_check", True, type=bool))
+
+    def set_online_check(self, enabled: bool) -> None:
+        self._settings.setValue("tools/online_check", enabled)
+        if enabled:
+            self.check_online()
+        else:
+            for key in win_tools.PINS:
+                self.tools_strip.set_notice(key, "")
+
+    def check_online(self) -> bool:
+        """Ask, in the background, whether the projects have newer releases.
+
+        Returns whether the question was sent. No answer, for whatever reason,
+        changes nothing and is not reported.
+        """
+        if not self.online_check_enabled() or self._latest_release is None \
+                or (self._online_thread is not None and self._online_thread.is_alive()):
+            return False
+        ask = self._latest_release
+
+        def work() -> None:
+            for key, pin in win_tools.PINS.items():
+                try:
+                    latest = ask(pin)
+                except Exception:      # noqa: BLE001 - a notice is never worth an error
+                    latest = None
+                self._online_results.put((key, latest))
+        self._online_thread = threading.Thread(target=work, name="tool-versions", daemon=True)
+        self._online_thread.start()
+        self._online_timer.start()
+        return True
+
+    def _take_online_results(self) -> None:
+        while True:
+            try:
+                key, latest = self._online_results.get_nowait()
+            except queue.Empty:
+                break
+            if latest is not None and self.online_check_enabled():
+                self.tools_strip.set_notice(
+                    key, win_tools.update_notice(win_tools.PINS[key], latest.tag), latest.url)
+        if self._online_thread is None or not self._online_thread.is_alive():
+            if self._online_results.empty():
+                self._online_timer.stop()
 
     def open_result_folder(self) -> None:
         folder = result_folder(self._calibration_glob)
@@ -229,7 +399,7 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
         result = self.calibration_panel.result()
         return WinFlowState(
             mouse_running=self.mouse_panel.is_running(),
-            mouse_possible=self.usbip_strip.found,
+            mouse_possible=self.tools_strip.found,
             folder_ok=panel.document is not None and panel.current() is not None,
             folder_problem=panel.problem,
             neutral=panel.is_neutral(),
