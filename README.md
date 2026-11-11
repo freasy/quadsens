@@ -294,10 +294,21 @@ work in any order.
 4. **Use result.** Press *Use result*. The four new values are filled in and
    the changed rows are marked as unsaved.
 5. **Apply.** Press *Apply*. The *Driver reports* column shows what the module
-   now uses.
+   now uses, and the line under the buttons says whether the driver is applying
+   it (see below).
 6. **Save.** Press *Save to config*. Until then the panel says "Applied, not
    saved: lost on module reload"; afterwards "Saved to config". See
    [Saving to the config file](#saving-to-the-config-file).
+
+**Is it active?** The line under the buttons of the driver card says whether
+the driver is applying the values, from a fresh read of the module
+parameters after every *Apply* and every few seconds while the window is
+visible: *Active in driver* with the four values and the time of the last
+*Apply*, *Active, but different from QuadSens* when another program changed
+them (both sets are shown), *Neutral* when all four are 1.0, *Not active*
+with the reason (module not loaded, not the fork), or *Cannot be verified*
+when the parameters are not readable for you. The driver check on top shows
+the same in short. Reading needs no extra rights and writes nothing.
 
 To calibrate again later, start at step 1; resetting the driver to 1.0 makes
 QuadSens wait for a new result.
@@ -355,13 +366,13 @@ state of the virtual mouse in
 
 ## Windows (preview)
 
-**Status (to be updated after testing on Windows):** written and tested on
-Linux, with stand-ins for RawAccel's files, for `writer.exe` and for
-usbip-win2. Verified so far on one Windows 11 VM: the virtual mouse can be
-attached without elevation through the usbip-win2 app, and it also attaches
-on Linux with the kernel's USB/IP client. **The automatic attach through
-`usbip.exe` from QuadSens is not yet verified on Windows, and neither is a
-calibration run natively on Windows.**
+**Status:** verified on one real Windows 11 PC and one Windows 11 VM:
+installing both tools from QuadSens, the automatic attach of the virtual
+mouse, the calibration in the game over the virtual mouse, and *Apply* to
+RawAccel all worked. That is one PC and one set of versions; other setups are
+untested. **Newer than that test and not yet run on Windows:** the "active"
+indicator with its read-back from RawAccel's driver, and *Re-apply at Windows
+sign-in*.
 
 On Windows QuadSens has two parts: a virtual mouse served over USB/IP, which
 receives the calibration from the game, and a panel that writes the four
@@ -395,7 +406,7 @@ first.
 
 ### Installing the two tools
 
-**Untested on Windows.** The first two lines of the window say whether
+The first two lines of the window say whether
 usbip-win2 and RawAccel were found, and in which version. Each has an
 *Install…* button. You can equally install both yourself from their release
 pages and press *Check again* (for RawAccel: *Choose folder…*).
@@ -496,7 +507,7 @@ serving and the device disappears on the Windows side.
   lists the attached devices; find the one with
   `usbip://127.0.0.1:3240/1-1` and remove it with `usbip detach -p <port>`.
 - *The game does not offer the calibration.* Start the virtual mouse before
-  the game. This is the part that is not verified on Windows yet.
+  the game.
 
 **Requirements**
 
@@ -544,11 +555,32 @@ are ever changed; the rest of the file stays byte for byte. If you change the
 four settings in RawAccel yourself later, QuadSens takes your values as the
 new originals.
 
-**After a restart.** RawAccel forgets its settings when Windows shuts down.
-The values stay in `settings.json`, so whatever loads that file at start
-brings them back: RawAccel's own startup mechanism if you set it up, or
-running `writer.exe settings.json` yourself. QuadSens does not add anything
-to the Windows startup.
+**Is it active?** Under *Apply* a line says whether RawAccel's driver is
+applying the values, and the same is shown in short in the RawAccel line on
+top. Where the driver can be read (RawAccel 1.7), QuadSens reads the four
+settings back from it every few seconds, without changing anything: *Active
+in driver* (equal to what was applied, with the time), *Active, but different
+from QuadSens* (something else changed them; both are shown), *Neutral* (the
+profile's own values), *Not applied since Windows started* (the driver runs
+but holds no settings), or *Not active* with the reason (driver not
+installed, restart pending, not running). With another driver version the
+values cannot be read back; the line then says *Sent to the driver HH:MM:SS,
+accepted by RawAccel's writer*, which is what is known, and *Not applied
+since Windows started* once Windows was restarted after that.
+
+**After a restart.** RawAccel's driver forgets its settings when Windows
+shuts down; they stay in `settings.json`. Tick *Re-apply at Windows sign-in*
+in the RawAccel card to have them loaded again each time you sign in. It is
+off by default; without it the card says "Values are lost when Windows
+restarts". What ticking does: it writes one value into the registry of your
+user account, `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`,
+name `QuadSens RawAccel settings`, data `"<folder>\writer.exe"
+"<folder>\settings.json"`. Windows then runs RawAccel's `writer.exe` at
+sign-in; no console appears, and `writer.exe` shows its own message if
+something is wrong. No administrator rights are needed. Unticking removes the
+value; if you choose another RawAccel folder, the entry moves with it. To
+remove it by hand: *Task Manager > Startup apps*, or delete the value with
+`regedit`. The checkbox always shows what is really in the registry.
 
 **Up and down.** The mapping of the calibration's two vertical values was
 verified on Linux only. If up and down feel swapped after applying, tick
@@ -573,9 +605,8 @@ time; that is expected for an unsigned program.
 - New values are entered with four decimals.
 - The virtual device is built from an analysis of the protocol. A future
   version of the game or of Proton may stop accepting it.
-- Windows: a preview. Applying values to RawAccel and the virtual mouse over
-  USB/IP are built; a calibration run natively on Windows is not verified
-  yet; see [Windows (preview)](#windows-preview).
+- Windows: a preview, verified on one Windows 11 PC and one VM; see
+  [Windows (preview)](#windows-preview).
 
 ## Troubleshooting
 
@@ -704,6 +735,9 @@ quadsens/              application package
   win_tools.py         the pinned releases of usbip-win2 and RawAccel (no Qt)
   win_download.py      fetch a pinned file and check it (no Qt)
   win_install.py       unpack, check and start the installers (no Qt)
+  win_autostart.py     the opt-in startup entry for RawAccel's writer (no Qt)
+  rawaccel_live.py     read RawAccel's driver state, read-only (no Qt)
+  active.py, active_linux.py   "is the driver applying it", in words (no Qt)
   persist.py           save to the config file and verify it (no Qt)
   steps.py             the guided steps, derived from state (no Qt)
   model.py             value types and number parsing (no Qt)
@@ -721,8 +755,8 @@ tests/
 99-quadsens.rules      udev rule
 quadsens.desktop       menu entry
 build.sh               builds dist/quadsens
-build-windows.ps1      builds dist\quadsens.exe (not yet run on Windows)
-.github/workflows/     tests and builds in CI (not yet run)
+build-windows.ps1      builds dist\quadsens.exe
+.github/workflows/     tests and builds in CI
 ```
 
 ## License
