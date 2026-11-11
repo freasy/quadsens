@@ -313,11 +313,11 @@ the same in short. Reading needs no extra rights and writes nothing.
 **Acceleration.** The head of the driver card shows the acceleration the
 driver is set to, for example "Acceleration: Linear, 0.05; cap none", read
 from the module parameters (or from `/etc/yeetmouse.conf` when the module
-cannot be read, which it then says). QuadSens only shows it. *Advanced > Open
-yeetmouse settings…* starts the driver's own settings program (`yeetmouse`,
-installed with the fork), where it is changed. A mode QuadSens does not know
-is shown by its number, not guessed. How the modes of yeetmouse and RawAccel
-relate is written up in [docs/accel-modes.md](docs/accel-modes.md).
+cannot be read, which it then says). *Acceleration* next to it opens the
+editor; see [Editing the acceleration](#editing-the-acceleration). *Advanced >
+Open yeetmouse settings…* starts the driver's own settings program
+(`yeetmouse`, installed with the fork). A mode QuadSens does not know is
+shown by its number, not guessed.
 
 To calibrate again later, start at step 1; resetting the driver to 1.0 makes
 QuadSens wait for a new result.
@@ -578,10 +578,11 @@ accepted by RawAccel's writer*, which is what is known, and *Not applied
 since Windows started* once Windows was restarted after that.
 
 **Acceleration.** Under the profile the card shows the acceleration of the
-selected profile as RawAccel's settings file names it, for example
-"Acceleration: Classic, acceleration 0.005, exponentClassic 2; ...", read-only.
-*Open RawAccel* starts `rawaccel.exe` from the chosen folder, where it is
-changed.
+selected profile as RawAccel's settings file names it. *Acceleration* opens
+the editor; see [Editing the acceleration](#editing-the-acceleration). *Open
+RawAccel* starts `rawaccel.exe` from the chosen folder. *Restore original*
+also puts the profile's original acceleration settings back, exactly as they
+were in the file.
 
 **After a restart.** RawAccel's driver forgets its settings when Windows
 shuts down; they stay in `settings.json`. Tick *Re-apply at Windows sign-in*
@@ -606,6 +607,99 @@ with `powershell -ExecutionPolicy Bypass -File build-windows.ps1` (needs
 Python 3.10 or newer), which writes `dist\quadsens.exe`. The executable is not
 signed, so Windows SmartScreen will warn about an unknown publisher the first
 time; that is expected for an unsigned program.
+
+## Editing the acceleration
+
+**New, and not yet tried on a real mouse on either system.** The numbers
+below come from the drivers' sources and from a userspace build of the
+yeetmouse fork's code, not from a running driver.
+
+Both driver cards have an *Acceleration* disclosure, closed by default. It
+edits six modes that yeetmouse and RawAccel compute the same way once the
+parameters are renamed:
+
+| Mode | Parameters |
+|---|---|
+| Off | none |
+| Linear | acceleration 0.0001 to 1; optional cap 0.1 to 10 |
+| Classic | acceleration 0.0001 to 2; exponent 1.01 to 5; optional cap 0.1 to 10 |
+| Power | scale 0.001 to 5; exponent 0.01 to 1; output offset 0 to 5; optional cap up to 10, above the offset |
+| Natural | decay rate 0.001 to 5; limit 0.01 to 8, not within 0.01 of 1; input offset 0 to 50; gain on or off |
+| Jump | jump at speed 0.1 to 50; multiplier after the jump 0.01 to 10; smoothness 0 to 1; gain on or off |
+
+Speeds are in counts per millisecond. The preview draws the multiplier over
+the speed, the curve being edited as a solid line and the one in the driver
+as a dashed line, with the cap, offset or jump point marked. Nothing changes
+until you press *Apply acceleration*; before that the editor shows "Current:
+… → New: …". *Revert to previous* goes back one step, to what was active
+before the last *Apply acceleration*.
+
+**Acceleration changes how the mouse feels far more than the four directional
+values.** A calibration reflects the acceleration that is active while you
+calibrate, so set the curve first and calibrate afterwards. And the two
+systems apply the directional values at different places: Linux before the
+curve, Windows after it. With acceleration on, the same four values therefore
+do not give exactly the same result on both.
+
+**What is refused, and why.** The limits above are narrower than either
+driver's own, and some combinations inside them are refused as well, with the
+reason shown under the preview:
+
+- a cap or offset whose point on the curve would lie beyond 100000 counts/ms
+  (for example Power with scale 0.5, exponent 0.05 and cap 3);
+- Power with an output offset above 99 × scale × exponent, or a cap that is
+  not above the offset;
+- a curve whose multiplier at 1000 counts/ms would exceed 100000.
+
+The reason is the yeetmouse fork: its fixed-point code divides without
+checking ranges. A userspace build of its unmodified sources stopped with a
+divide error for such sets, including sets its own settings program allows;
+what the kernel does then was not tested. Other sets make it switch
+acceleration off without telling. QuadSens therefore checks before it writes,
+on both systems, so that the same curves are available on both. The same
+checks are built into the pkexec helper, which does not trust its caller.
+
+**Everything else stays in the driver's own program.** If the driver is set
+to something outside these six modes, the editor is read-only and says why:
+on Linux another mode (Motivity, Synchronous, look-up table, custom curve),
+or `Offset`, `InputCap`, `OutputCap` or `PreScale` in use; on Windows
+separate curves per axis, `lpNorm` other than 2, weights, a speed cap,
+smoothing halflives, a cap mode other than "output", a cap without gain, a
+device DPI, or the modes `lut`, `synchronous` and `motivity`. QuadSens never
+converts such a configuration. Rotation, snapping and sensitivity are not
+touched at all.
+
+**Linux details.** The curve is written to the module parameters with ten
+decimals, all four shared parameters and the mode every time, then
+`UseSmoothing`, then `update`; directly if you may write them, otherwise
+through the pkexec helper (install the current `helper/quadsens-apply` if
+yours is older; it then answers "expected exactly four values"). It takes
+effect with the next mouse movement, within a second. Afterwards QuadSens
+reads the parameters back. **The module does not report whether it accepted
+a set**: when it rejects one it keeps the written text and only writes to the
+kernel log. QuadSens says so, and relies on its checks. If the read-back
+differs from what was written, that is shown as an error with *Revert to
+previous*. *Save to config* persists the curve like the directional values;
+the fork's `yeetmousectl` keeps six significant digits when it saves, so
+after a reload a parameter can differ from the ten decimals QuadSens wrote in
+the seventh digit.
+
+**Windows details.** Only the needed values inside the profile's "Whole or
+horizontal accel parameters" are changed; the rest of `settings.json` stays
+byte for byte. The cap, the cap mode and the gain switch are always written,
+because RawAccel shares those between modes. The result must pass a port of
+RawAccel's own check before `writer.exe` is run. The first change keeps a
+backup of the file and remembers the original acceleration settings;
+*Restore original* puts them back exactly. With RawAccel 1.7 the indicator
+also reads the mode and parameters back from the driver.
+
+**Accuracy.** As formulas the six modes are the same in both drivers. The
+fork computes them in fixed point; measured against RawAccel's
+double-precision formulas for speeds from 0.01 to 150 counts/ms, its
+multiplier differs by at most about 2e-5 (relative) for Linear, Classic,
+Power and Jump, and for Natural with gain by up to 1e-2 at very low speeds
+(0.01 counts/ms), shrinking as the speed rises. Details, sources and what is
+still uncertain: [docs/accel-modes.md](docs/accel-modes.md).
 
 ## Limitations and status
 
@@ -754,6 +848,8 @@ quadsens/              application package
   rawaccel_live.py     read RawAccel's driver state, read-only (no Qt)
   active.py, active_linux.py   "is the driver applying it", in words (no Qt)
   accel.py             acceleration settings of both drivers, read-only (no Qt)
+  accel_edit.py        the six editable curves: limits, reference curve, values for
+                       both drivers (no Qt)
   persist.py           save to the config file and verify it (no Qt)
   steps.py             the guided steps, derived from state (no Qt)
   model.py             value types and number parsing (no Qt)
