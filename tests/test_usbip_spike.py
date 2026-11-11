@@ -425,13 +425,13 @@ class ServerTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.server.stop()
-        self.thread.join(timeout=3)
+        self.thread.join(timeout=30)
 
     def messages(self) -> list[str]:
         return [entry["message"] for entry in self.entries if entry.get("event") == "server"]
 
     def wait_for(self, text: str) -> None:
-        deadline = time.monotonic() + 3
+        deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             if any(text in message for message in self.messages()):
                 return

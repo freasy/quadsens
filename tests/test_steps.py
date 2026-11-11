@@ -28,6 +28,7 @@ from quadsens.steps import (
     derive,
     derive_windows,
     done_steps,
+    is_newer,
     is_unity,
 )
 
@@ -183,6 +184,18 @@ class ResultTest(unittest.TestCase):
         enabled = {"t": 0.0, "cmd": "SET", "id": P_DIR_SENS_ENABLED, "value": 1,
                    "highlight": "raw text"}
         self.assertIn("switched on", summarize_entry(enabled))
+
+
+class NewerTest(unittest.TestCase):
+    def test_times_rounded_to_the_millisecond_still_count_as_after(self) -> None:
+        baseline = 1700000000.0003              # the reset
+        written = round(1700000000.0004, 3)     # a write right after, as the log stamps it
+        self.assertLess(written, baseline)      # the rounding went below the baseline
+        self.assertTrue(is_newer(written, baseline))
+        self.assertTrue(is_newer(baseline + 5, baseline))
+        self.assertFalse(is_newer(baseline - 0.002, baseline))
+        self.assertFalse(is_newer(baseline - 3600, baseline))
+        self.assertFalse(is_newer(baseline, None))
 
 
 class WindowsStepsTest(unittest.TestCase):

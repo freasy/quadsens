@@ -11,6 +11,7 @@ right now.
 from __future__ import annotations
 
 import enum
+import math
 from dataclasses import dataclass
 
 from .model import Scalars
@@ -134,6 +135,19 @@ class StepInfo:
         total = len(type(self.step))
         text = f"Step {self.number} of {total}, {TITLES[self.step]}: {self.status.value}."
         return f"{text} {self.detail}" if self.detail else text
+
+
+def is_newer(result_time: float, baseline: float | None) -> bool:
+    """Whether a result arrived after ``baseline`` (the mouse start or the reset).
+
+    Log entries carry times rounded to the millisecond, which can round a
+    time down to just before a baseline taken a moment earlier. Both are
+    therefore compared at millisecond resolution, and the same millisecond
+    counts as after.
+    """
+    if baseline is None:
+        return False
+    return round(result_time * 1000) >= math.floor(baseline * 1000)
 
 
 def is_unity(scalars: Scalars | None) -> bool:

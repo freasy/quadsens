@@ -26,7 +26,7 @@ from ..hints import (
 )
 from ..model import Scalars
 from ..persist import Saver
-from ..steps import FlowState, Status, Step, StepInfo, derive, is_unity
+from ..steps import FlowState, Status, Step, StepInfo, derive, is_newer, is_unity
 from .calibration_panel import CalibrationPanel
 from .driver_panel import SAME_VALUE, DriverPanel
 from .driver_strip import DriverCheckStrip
@@ -284,8 +284,7 @@ class MainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
             driver_problem=panel.write_problem(),
             driver_missing=panel.fork_missing(),
             result_available=wanted is not None,
-            result_is_new=(result is not None and self._baseline is not None
-                           and result.time > self._baseline),
+            result_is_new=result is not None and is_newer(result.time, self._baseline),
             result_in_editor=wanted is not None and panel.values().is_close(
                 wanted, SAME_VALUE),
             result_in_driver=(wanted is not None and driver is not None

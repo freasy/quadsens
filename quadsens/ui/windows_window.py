@@ -26,6 +26,7 @@ from ..steps import (
     WinFlowState,
     WinStep,
     derive_windows,
+    is_newer,
 )
 from ..usbip_mouse import VirtualMouse
 from ..usbip_server import VirtualMouseServer
@@ -233,8 +234,7 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
             folder_problem=panel.problem,
             neutral=panel.is_neutral(),
             result_available=result is not None,
-            result_is_new=(result is not None and self._baseline is not None
-                           and result.time > self._baseline),
+            result_is_new=result is not None and is_newer(result.time, self._baseline),
             values_ready=panel.values_ready(),
             applied=panel.is_applied())
 
