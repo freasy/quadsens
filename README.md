@@ -174,10 +174,12 @@ later, the script puts the previous driver back and the dialog says which
 state the system is in.
 
 **Status of this feature.** State detection, the prerequisite check, the dry
-run and the script's logic are tested against stand-in tools. **A real install
-and a real revert through this dialog have not been run yet.** Until that is
-confirmed, treat it as untested on real systems and keep the manual way at
-hand.
+run and the script's logic are tested against stand-in tools. A real revert
+followed by a real install through this dialog has been run successfully on
+one system (Manjaro, kernel 7.2, DKMS, previous driver installed with the
+upstream `install.sh`). Other distributions, a driver installed from a
+distribution package, and the failure rollback on a real system are untested;
+keep the manual way at hand.
 
 **By hand instead.** The fork documents the manual installation in its
 [DIRECTIONAL_SCALING.md](https://github.com/freasy/YeetMouse/blob/feature/directional-scalars/DIRECTIONAL_SCALING.md).
