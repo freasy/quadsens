@@ -25,6 +25,7 @@ version = {attr = "quadsens.__version__"}
 [tool.setuptools.data-files]
 "share/icons/hicolor/scalable/apps" = ["assets/quadsens.svg"]
 "share/applications" = ["quadsens.desktop"]
+"share/quadsens" = ["helper/quadsens-driver.sh"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

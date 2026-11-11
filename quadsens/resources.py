@@ -13,7 +13,10 @@ from pathlib import Path
 
 ICON_FILE = "assets/quadsens.svg"
 # Where pyproject.toml installs the icon, relative to the installation prefix.
-_INSTALLED = {ICON_FILE: "share/icons/hicolor/scalable/apps/quadsens.svg"}
+_INSTALLED = {
+    ICON_FILE: "share/icons/hicolor/scalable/apps/quadsens.svg",
+    "helper/quadsens-driver.sh": "share/quadsens/quadsens-driver.sh",
+}
 
 
 def resource_root() -> Path:

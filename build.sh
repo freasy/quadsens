@@ -4,6 +4,8 @@
 # into ./.venv (no root, nothing installed system-wide). The icon is bundled as
 # data (found at run time through quadsens/resources.py); PySide6.QtSvg is
 # named explicitly so that Qt's SVG icon plugin and its library are included.
+# The driver installer script is bundled as data too: the application shows it
+# and feeds its text to a shell; the bundled file itself is never executed.
 set -eu
 cd "$(dirname "$0")"
 PYTHON="${PYTHON:-python3}"
@@ -12,5 +14,6 @@ PYTHON="${PYTHON:-python3}"
 .venv/bin/pyinstaller --noconfirm --clean --onefile --windowed --name quadsens \
     --paths . --exclude-module PyQt6 --exclude-module tkinter \
     --add-data assets/quadsens.svg:assets --hidden-import PySide6.QtSvg \
+    --add-data helper/quadsens-driver.sh:helper \
     packaging/entry.py
 echo "Built: $(pwd)/dist/quadsens"
