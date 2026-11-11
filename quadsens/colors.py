@@ -24,6 +24,21 @@ RGB = tuple[int, int, int]
 # Hues of the semantic tints (degrees). Saturation and lightness come from the
 # palette, only the hue is fixed: green, amber, red.
 SUCCESS_HUE, WARNING_HUE, ERROR_HUE = 140.0, 38.0, 4.0
+# An accent closer than this to the error hue is "red": red then means the
+# application, not an error, and the error banner gets a neutral treatment.
+RED_RANGE = 25.0
+# Smallest luminance ratio between a banner mark and a red accent.
+LOOKALIKE_CONTRAST = 1.5
+
+# The built-in theme: near-black with a red accent. These five colours go
+# through derive_theme() like a system palette, so the same contrast rules hold.
+QUADSENS_BASE: dict[str, str] = {
+    "window": "#0b0b0d",       # near black
+    "base": "#1b1b20",         # input fields and the log, a step above the cards
+    "text": "#ececf0",         # light grey, slightly cool
+    "accent": "#d7263d",       # saturated red that carries white text
+    "accent_text": "#ffffff",
+}
 
 
 def parse(color: str) -> RGB:
@@ -101,6 +116,23 @@ def soften(background: str, toward: str, foregrounds: list[str], target: float) 
     return toward
 
 
+def hue(color: str) -> float:
+    """Hue of a colour in degrees (0..360); 0 for greys."""
+    r, g, b = (c / 255 for c in parse(color))
+    return colorsys.rgb_to_hls(r, g, b)[0] * 360
+
+
+def saturation(color: str) -> float:
+    r, g, b = (c / 255 for c in parse(color))
+    return colorsys.rgb_to_hls(r, g, b)[2]
+
+
+def is_reddish(color: str) -> bool:
+    """Whether a colour would be read as red, i.e. as the error colour."""
+    distance = abs((hue(color) - ERROR_HUE + 180) % 360 - 180)
+    return saturation(color) > 0.25 and distance <= RED_RANGE
+
+
 def with_hue(hue: float, like: str) -> str:
     """A colour of the given hue with the saturation and lightness class of ``like``."""
     r, g, b = (c / 255 for c in parse(like))
@@ -126,7 +158,8 @@ class Theme:
     control: str         # fill of a secondary button
     control_hover: str
     control_pressed: str
-    accent: str          # primary button, focus ring, arrows
+    accent: str          # fill of the primary button and of the current step
+    accent_line: str     # accent for thin things: lines, outlines, arrows, links
     accent_hover: str
     accent_pressed: str
     on_accent: str       # text on the accent
@@ -141,9 +174,11 @@ class Theme:
     warning_mark: str
     error_bg: str
     error_mark: str
+    red_accent: bool     # the accent is red: errors are not marked by a red tint
 
     def as_dict(self) -> dict[str, str]:
-        return {f.name: getattr(self, f.name) for f in fields(self) if f.name != "dark"}
+        return {f.name: getattr(self, f.name) for f in fields(self)
+                if f.name not in ("dark", "red_accent")}
 
     def checks(self) -> list[tuple[str, str, str, float]]:
         """Every (name, foreground, background, required ratio) the look relies on."""
@@ -157,6 +192,8 @@ class Theme:
             result.append((f"control outline on {name}", self.outline, ground,
                            COMPONENT_CONTRAST))
             result.append((f"focus ring on {name}", self.focus, ground, COMPONENT_CONTRAST))
+            result.append((f"accent line on {name}", self.accent_line, ground,
+                           TEXT_CONTRAST))
             result.append((f"scroll handle on {name}", self.handle, ground,
                            COMPONENT_CONTRAST))
         for name in ("control", "control_hover", "control_pressed"):
@@ -180,6 +217,26 @@ class Theme:
             result.append((f"mark on {kind} banner", getattr(self, f"{kind}_mark"), ground,
                            COMPONENT_CONTRAST))
         return result
+
+    def accent_lookalikes(self) -> list[str]:
+        """Banner marks that could be mistaken for the accent (empty = none).
+
+        Hue alone does not count: with a red-green deficiency red, amber and
+        green differ mainly in lightness. A mark therefore has to differ from
+        the accent fill in luminance, and the error banner must not be an
+        accent-coloured tint when the accent itself is red.
+        """
+        problems = []
+        if not self.red_accent:
+            return problems   # a blue or green accent is not confused with these
+        for kind in ("success", "warning", "error"):
+            mark = getattr(self, f"{kind}_mark")
+            if contrast(mark, self.accent) < LOOKALIKE_CONTRAST:
+                problems.append(f"{kind} mark is as light as the accent")
+        if (is_reddish(self.error_bg) or is_reddish(self.error_mark)
+                                or is_reddish(self.info_bg)):
+            problems.append("a banner is tinted red although red is the accent")
+        return problems
 
     def failures(self) -> list[str]:
         """Descriptions of the checks that do not reach their ratio (empty = all fine)."""
@@ -236,7 +293,10 @@ def derive_theme(window: str, base: str, text: str, accent: str,
     away = "#ffffff" if luminance(on_accent) < luminance(accent) else "#000000"
     accent_hover = soften(mix(accent, away, 0.12), accent, [on_accent], TEXT_CONTRAST)
     accent_pressed = soften(mix(accent, away, 0.22), accent, [on_accent], TEXT_CONTRAST)
-    focus = ensure_contrast(accent, grounds, COMPONENT_CONTRAST)
+    # Thin elements need more than a fill does: lighten or darken the accent
+    # towards the text colour until it reads like text.
+    accent_line = ensure_contrast(mix(accent, text, 0.18), grounds, TEXT_CONTRAST)
+    focus = accent_line
     focus_on_accent = ensure_contrast(text, [window, surface], COMPONENT_CONTRAST)
 
     def tint(color: str) -> tuple[str, str]:
@@ -244,17 +304,43 @@ def derive_theme(window: str, base: str, text: str, accent: str,
         mark = ensure_contrast(mix(color, text, 0.35), background, COMPONENT_CONTRAST)
         return background, mark
 
-    info_bg, info_mark = tint(accent)
     success_bg, success_mark = tint(with_hue(SUCCESS_HUE, accent))
     warning_bg, warning_mark = tint(with_hue(WARNING_HUE, accent))
-    error_bg, error_mark = tint(with_hue(ERROR_HUE, accent))
+    red_accent = is_reddish(accent)
+    if red_accent:
+        # Amber and green must not pass for the accent when hues are hard to
+        # tell apart: move their marks away from it in lightness.
+        def apart(mark: str, background: str) -> str:
+            away = "#000000" if luminance(background) > luminance(accent) else "#ffffff"
+            for step in range(0, 21):
+                candidate = mix(mark, away, step / 20)
+                if contrast(candidate, accent) >= LOOKALIKE_CONTRAST:
+                    return candidate
+            return away
+
+        success_mark = apart(success_mark, success_bg)
+        warning_mark = apart(warning_mark, warning_bg)
+        # Red is the application's colour here. Information is neutral, and an
+        # error is the strongest neutral there is: text-coloured border and mark.
+        info_bg = soften(mix(surface, text, 0.09), surface, [text], TEXT_CONTRAST)
+        info_mark = ensure_contrast(muted, info_bg, COMPONENT_CONTRAST)
+        error_bg = soften(mix(surface, text, 0.16), surface, [text], TEXT_CONTRAST)
+        error_mark = ensure_contrast(text, error_bg, TEXT_CONTRAST)
+    else:
+        info_bg, info_mark = tint(accent)
+        error_bg, error_mark = tint(with_hue(ERROR_HUE, accent))
 
     return Theme(
         dark=dark, window=window, surface=surface, base=base, text=text, muted=muted,
         disabled=disabled, border=border, outline=outline, control=control,
         control_hover=control_hover, control_pressed=control_pressed, accent=accent,
         accent_hover=accent_hover, accent_pressed=accent_pressed, on_accent=on_accent,
-        focus=focus, focus_on_accent=focus_on_accent, handle=handle,
+        accent_line=accent_line, focus=focus, focus_on_accent=focus_on_accent, handle=handle,
         info_bg=info_bg, info_mark=info_mark, success_bg=success_bg,
         success_mark=success_mark, warning_bg=warning_bg, warning_mark=warning_mark,
-        error_bg=error_bg, error_mark=error_mark)
+        error_bg=error_bg, error_mark=error_mark, red_accent=red_accent)
+
+
+def quadsens_theme() -> Theme:
+    """The built-in black and red colour set."""
+    return derive_theme(**QUADSENS_BASE)

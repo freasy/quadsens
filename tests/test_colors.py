@@ -17,6 +17,9 @@ PALETTES = {
     "light, pale accent": ("#f6f6f6", "#ffffff", "#1a1a1a", "#ffe08a", "#ffffff"),
     "dark, dark accent": ("#202020", "#181818", "#dddddd", "#30343a", "#ffffff"),
     "all the same": ("#777777", "#777777", "#777777", "#777777", "#777777"),
+    "light, red accent": ("#efefef", "#ffffff", "#232629", "#da4453", "#ffffff"),
+    "built-in black and red": tuple(colors.QUADSENS_BASE[key] for key in (
+        "window", "base", "text", "accent", "accent_text")),
 }
 
 
@@ -85,6 +88,7 @@ class ThemeContrastTest(unittest.TestCase):
         theme = derive_theme(*PALETTES["typical light"])
         labels = [label for label, _fg, _bg, _need in theme.checks()]
         for expected in ("text on surface", "muted text on window", "control outline on base",
+                         "accent line on window",
                          "focus ring on surface", "text on accent", "text on control_hover",
                          "disabled text on control", "primary button against card",
                          "focus ring of primary button against card",
@@ -140,11 +144,58 @@ class ThemeContrastTest(unittest.TestCase):
             self.assertTrue(label)
             self.assertGreaterEqual(ratio, 3.0, name)
 
+    def test_built_in_theme(self) -> None:
+        theme = colors.quadsens_theme()
+        self.assertEqual(theme.failures(), [])
+        self.assertTrue(theme.dark)
+        self.assertEqual(theme.window, "#0b0b0d")              # near black, as given
+        self.assertEqual(theme.accent, "#d7263d")              # the red needs no fixing
+        self.assertEqual(theme.on_accent, "#ffffff")
+        self.assertGreaterEqual(contrast("#ffffff", theme.accent), 4.5)
+        self.assertGreaterEqual(contrast(theme.accent, theme.surface), 3.0)
+        # Cards and fields are set off from the window, in that order of lightness.
+        self.assertGreater(colors.luminance(theme.surface), colors.luminance(theme.window))
+        self.assertGreater(colors.luminance(theme.base), colors.luminance(theme.surface))
+        # Thin red elements use a lighter red that reads like text on black.
+        self.assertNotEqual(theme.accent_line, theme.accent)
+        self.assertGreater(colors.luminance(theme.accent_line), colors.luminance(theme.accent))
+        self.assertGreaterEqual(contrast(theme.accent_line, theme.window), 4.5)
+        self.assertTrue(colors.is_reddish(theme.accent_line))
+        self.assertEqual(theme.focus, theme.accent_line)
+
+    def test_red_accent_does_not_mean_error(self) -> None:
+        for name in ("built-in black and red", "light, red accent"):
+            theme = derive_theme(*PALETTES[name])
+            with self.subTest(palette=name):
+                self.assertTrue(theme.red_accent)
+                self.assertEqual(theme.accent_lookalikes(), [])
+                # The error banner is neutral and the strongest one: text-coloured mark.
+                self.assertFalse(colors.is_reddish(theme.error_bg))
+                self.assertFalse(colors.is_reddish(theme.error_mark))
+                self.assertFalse(colors.is_reddish(theme.info_bg))
+                self.assertGreaterEqual(contrast(theme.error_mark, theme.error_bg), 4.5)
+                self.assertNotEqual(theme.error_bg, theme.info_bg)
+                # Amber and green differ from the red in lightness, not only in hue.
+                for mark in (theme.warning_mark, theme.success_mark):
+                    self.assertGreaterEqual(contrast(mark, theme.accent), 1.5)
+                    self.assertFalse(colors.is_reddish(mark))
+        blue = derive_theme(*PALETTES["typical dark"])
+        self.assertFalse(blue.red_accent)
+        self.assertTrue(colors.is_reddish(blue.error_mark))   # red may mean error there
+        self.assertEqual(blue.accent_lookalikes(), [])
+
+    def test_reddish(self) -> None:
+        for color in ("#d7263d", "#ff0000", "#da4453", "#e0605f"):
+            self.assertTrue(colors.is_reddish(color), color)
+        for color in ("#3daee9", "#deb46d", "#6bde93", "#808080", "#000000", "#b58900"):
+            self.assertFalse(colors.is_reddish(color), color)
+
     def test_all_values_are_colours(self) -> None:
         theme = derive_theme(*PALETTES["typical dark"])
         for name, value in theme.as_dict().items():
             self.assertRegex(value, r"^#[0-9a-f]{6}$", name)
         self.assertNotIn("dark", theme.as_dict())
+        self.assertNotIn("red_accent", theme.as_dict())
 
 
 if __name__ == "__main__":
