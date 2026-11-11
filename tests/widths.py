@@ -29,7 +29,7 @@ REFERENCE_TEXT = "The quick brown fox jumps over the lazy dog 0123456789"
 REFERENCE_WIDTH = 323
 REFERENCE_HEIGHT = 17
 # What a window may need at most, in the reference font, before it scrolls.
-LINUX_FIT = (720, 540)             # the whole Linux window, collapsed
+LINUX_FIT = (720, 900)             # the whole Linux window, acceleration card included
 WINDOWS_CONTENT_WIDTH = 760 - 16   # the page of the Windows window: no sideways scrolling
 WINDOWS_DEFAULT_WIDTH = 900 - 16   # ... and with every table filled, at the default size
 

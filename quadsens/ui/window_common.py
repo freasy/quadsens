@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import html
 
 from .. import about
@@ -19,6 +21,19 @@ def about_html() -> str:
             f"<p>{disclaimer}</p>")
 
 
+
+def fit_to_screen(window: QtWidgets.QWidget, width: int, height: int) -> None:
+    """Give the window its default size, but never more than the screen offers.
+
+    The page scrolls when it does not fit, so a smaller screen costs nothing
+    but scrolling.
+    """
+    screen = window.screen() or QtGui.QGuiApplication.primaryScreen()
+    if screen is not None:
+        room = screen.availableGeometry()
+        width, height = min(width, room.width()), min(height, room.height() - 40)
+    window.resize(width, height)
+
 class WindowCommon:
     """Mixin for a QMainWindow with ``_settings``, ``theme`` and a ``calibration_panel``."""
 
@@ -28,7 +43,7 @@ class WindowCommon:
 
     def build_view_menu(self) -> None:
         # No mnemonic: every letter of "View" belongs to a control of the window.
-        view_menu = self.menuBar().addMenu("View")
+        self.view_menu = view_menu = self.menuBar().addMenu("View")
         theme_menu = view_menu.addMenu("&Theme")
         self.theme_group = QtGui.QActionGroup(self)
         self.theme_group.setExclusive(True)
@@ -65,6 +80,15 @@ class WindowCommon:
         zoom_menu.setToolTipsVisible(True)
         self.zoom_menu = zoom_menu
         self.calibration_panel.diagram.set_zoom(current)
+
+    def add_accel_action(self, open_editor: Callable[[], object]) -> None:
+        """View > Acceleration…: the way from the menu bar to the acceleration editor."""
+        self.accel_action = QtGui.QAction("&Acceleration…", self)
+        self.accel_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+A"))
+        self.accel_action.setToolTip("Open the acceleration editor of the driver card")
+        self.accel_action.triggered.connect(lambda _checked=False: open_editor())
+        self.view_menu.addSeparator()
+        self.view_menu.addAction(self.accel_action)
 
     def set_diagram_zoom(self, centre: float) -> None:
         """Choose what the centre of the direction diagram stands for; remembered."""

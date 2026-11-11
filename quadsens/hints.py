@@ -31,6 +31,10 @@ FIRST_STEPS: tuple[str, ...] = (
     "Press Save to config, so that the values survive a module reload.",
 )
 
+ACCEL_HINT = ("The acceleration curve of the driver is edited in the Acceleration card "
+              "at the bottom of the window (View > Acceleration… jumps there). Set it "
+              "before you calibrate.")
+
 PERSIST = (
     "Applied values last until the yeetmouse module is reloaded (or the next boot). "
     "Save to config keeps them: it runs the fork's \"yeetmousectl save\".")

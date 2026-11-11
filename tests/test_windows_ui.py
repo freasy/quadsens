@@ -241,7 +241,7 @@ class WindowsWindowTest(WindowCase):
         widths.assert_fits(self, content.minimumSizeHint(),
                            (widths.WINDOWS_CONTENT_WIDTH, windows_window.DEFAULT_SIZE[1] - 30),
                            content)
-        self.assertLessEqual(windows_window.DEFAULT_SIZE[1], 800)
+        self.assertLessEqual(windows_window.DEFAULT_SIZE[1], 1080)
 
     @needs_fake_writer
     def test_walk_through_import_folder_preview_apply(self) -> None:
@@ -714,7 +714,7 @@ class VirtualMouseWindowTest(WindowCase):
         # The whole text stays reachable: as text for screen readers, and as
         # tooltip where it was cut.
         window.resize(900, 720)
-        label = window.mouse_panel.status_label
+        label = window.tools_strip.headline     # not rewritten by a timer meanwhile
         label.setText(widths.LONG_PATH)
         for _ in range(3):
             _app.processEvents()
@@ -1168,13 +1168,13 @@ class ActiveAndAutostartTest(WindowCase):
         window = self.make()
         window.show()
         panel = window.rawaccel_panel
-        self.assertEqual(panel.accel_label.text(), "Acceleration: off")
+        self.assertEqual(panel.accel_text(), "Acceleration: off")
         panel.profile_combo.setCurrentIndex(1)
-        self.assertEqual(panel.accel_label.text(),
+        self.assertEqual(panel.accel_text(),
                          "Acceleration: Classic, acceleration 0.005, exponentClassic 2; "
                          "cap (output) input 15, output 1.5; gain")
         panel.profile_combo.setCurrentIndex(2)
-        self.assertIn("Natural", panel.accel_label.text())
+        self.assertIn("Natural", panel.accel_text())
         self.assertEqual(self.settings_file.read_bytes(), original)     # nothing written
 
         started: list[tuple[str, str]] = []
@@ -1234,7 +1234,7 @@ class ActiveAndAutostartTest(WindowCase):
         window = self.make(choose=False)
         panel = window.rawaccel_panel
         self.assertFalse(panel.settings_button.isEnabled())           # no folder, no RawAccel
-        self.assertEqual(panel.accel_label.text(),
+        self.assertEqual(panel.accel_text(),
                          "Acceleration: not read (no settings file)")
         self.assertFalse(panel.autostart_check.isEnabled())
         self.assertIn("Needs the RawAccel folder", panel.boot_label.text())
@@ -1261,26 +1261,45 @@ class AccelEditTest(WindowCase):
         document = rawaccel.read(self.settings_file)
         return accel_edit.classify_rawaccel(document.profile(index), document.data)
 
-    def test_collapsed_by_default_with_the_summary(self) -> None:
+    def test_acceleration_card_is_always_there_below_the_two_cards(self) -> None:
         window = self.make()
         window.show()
-        panel = window.rawaccel_panel
-        self.assertFalse(panel.accel_toggle.isChecked())
-        self.assertFalse(panel.accel_editor.isVisible())
-        self.assertEqual(panel.accel_label.text(), "Acceleration: off")
-        content = window.scroll.widget()
-        widths.assert_fits(self, content.minimumSizeHint(),
-                           (widths.WINDOWS_CONTENT_WIDTH, windows_window.DEFAULT_SIZE[1] - 30),
-                           content)
-        panel.accel_toggle.setChecked(True)
         _app.processEvents()
+        panel = window.rawaccel_panel
         editor = panel.accel_editor
+        card = panel.accel_card
+        self.assertTrue(card.isVisible())
         self.assertTrue(editor.isVisible())
+        self.assertGreater(card.y(), panel.geometry().bottom())
+        self.assertGreater(card.y(), window.calibration_panel.geometry().bottom())
+        self.assertGreaterEqual(card.width(),
+                                panel.width() + window.calibration_panel.width())
+        self.assertGreater(editor.preview.x(), editor.mode_combo.geometry().right())
+        self.assertGreaterEqual(editor.preview.width(), 300)
+        for name in ("accel_toggle", "accel_row", "accel_dialog", "accel_label"):
+            self.assertFalse(hasattr(panel, name), name)
+        self.assertEqual(panel.accel_text(), "Acceleration: off")
         self.assertEqual(editor.found().curve, accel_edit.make("off"))
         self.assertIn("after the curve", editor.note_label.text())
         self.assertIn('In RawAccel this is "exponentClassic"',
                       editor.pages["classic"].spins["exponent"].toolTip())
+        self.assertEqual(editor.settings_button.text(), "Open RawAccel")
+        self.assertIs(panel.settings_button, editor.settings_button)
         self.assertEqual(len(window.steps_bar.chips), 5)             # not a step
+        content = window.scroll.widget()
+        widths.assert_fits(self, content.minimumSizeHint(),
+                           (widths.WINDOWS_CONTENT_WIDTH, windows_window.DEFAULT_SIZE[1] - 30),
+                           content)
+        self.assertEqual(windows_window.DEFAULT_SIZE, (900, 1080))
+        order = window.tab_order
+        self.assertLess(order.index(panel.apply_button), order.index(editor.mode_combo))
+        self.assertLess(order.index(editor.mode_combo), order.index(editor.apply_button))
+        self.assertEqual(window.accel_action.shortcut().toString(), "Ctrl+Shift+A")
+        window.accel_action.trigger()
+        window.steps_action.trigger()
+        assert window.info_box is not None
+        self.assertIn("Acceleration card", window.info_box.text())
+        window.info_box.close()
 
     def test_each_mode_changes_only_its_tokens_and_restore_puts_every_byte_back(self) -> None:
         window = self.make()
@@ -1317,7 +1336,7 @@ class AccelEditTest(WindowCase):
                              len(self.original.splitlines()))
             # RawAccel has no linear mode of its own: it is classic with exponent 2.
             name = "classic" if curve.mode == "linear" else curve.mode
-            self.assertIn(name, panel.accel_label.text().lower())
+            self.assertIn(name, panel.accel_text().lower())
         self.assertEqual(self.found().curve, accel_edit.make("off"))
         # A cap that is off is written as 0, not left at the 1.5 another mode had.
         editor.set_curve(accel_edit.make("linear"))
@@ -1384,9 +1403,12 @@ class AccelEditTest(WindowCase):
         for index, words in ((1, "cap mode"), (2, "by component")):
             panel.profile_combo.setCurrentIndex(index)
             self.assertFalse(editor.found().editable)
+            self.assertTrue(panel.accel_card.isVisible())
             self.assertFalse(editor.editing.isVisibleTo(editor))
+            self.assertIn("Set outside what QuadSens edits", editor.readonly_label.text())
             self.assertIn(words, editor.readonly_label.text())
             self.assertIn("settings program of RawAccel", editor.readonly_label.text())
+            self.assertTrue(editor.settings_button.isVisibleTo(editor))
             panel.apply_accel(accel_edit.make("linear"))
             self.assertIn("does not edit", panel.message.text())
             self.assertEqual(self.settings_file.read_bytes(), changed)

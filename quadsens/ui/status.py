@@ -86,50 +86,6 @@ class Disclosure(QtWidgets.QToolButton):
         self._target.setVisible(shown)
 
 
-class SummaryDisclosure(Disclosure):
-    """A disclosure whose text is a summary of what it opens.
-
-    The summary is shortened with an ellipsis to the room there is, so the
-    button never asks for more width than its first word needs; the tooltip
-    and the accessible description have it in full.
-    """
-
-    def __init__(self, name: str, target: QtWidgets.QWidget,
-                 parent: QtWidgets.QWidget | None = None) -> None:
-        self._summary = name
-        self._name = name
-        super().__init__(name, target, parent)
-        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
-                           QtWidgets.QSizePolicy.Policy.Fixed)
-
-    def summary(self) -> str:
-        return self._summary
-
-    def set_summary(self, text: str, detail: str = "") -> None:
-        self._summary = text
-        self.setAccessibleDescription(detail or text)
-        self._apply(self.isChecked())
-
-    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 (Qt name)
-        hint = super().minimumSizeHint()
-        narrow = self.fontMetrics().horizontalAdvance("%s %s…" % (CHEVRON_CLOSED,
-                                                                 self._name[:5])) + 16
-        return QtCore.QSize(min(hint.width(), narrow), hint.height())
-
-    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802 (Qt name)
-        super().resizeEvent(event)
-        self._apply(self.isChecked())
-
-    def _apply(self, shown: bool) -> None:
-        chevron = CHEVRON_OPEN if shown else CHEVRON_CLOSED
-        room = max(self.width() - 30, 0)       # padding of the button in every look
-        text = self.fontMetrics().elidedText(
-            "%s %s" % (chevron, self._summary), QtCore.Qt.TextElideMode.ElideRight, room) \
-            if self.width() > 0 and self.isVisible() else "%s %s" % (chevron, self._summary)
-        self.setText(text)
-        self._target.setVisible(shown)
-
-
 class StatusDot(QtWidgets.QWidget):
     """A round marker: hollow = off, half tone = waiting, filled = active.
 

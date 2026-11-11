@@ -52,9 +52,9 @@ from .install_dialog import ToolInstallDialog
 from .tools_strip import RawAccelInfo, ToolsStrip
 from .usbip_panel import UsbipMousePanel
 from .values_io import ValuesIO
-from .window_common import WindowCommon, about_html
+from .window_common import WindowCommon, about_html, fit_to_screen
 
-DEFAULT_SIZE = (900, 780)
+DEFAULT_SIZE = (900, 1080)      # everything visible; smaller screens scroll
 # Below the size at which everything fits, the page scrolls instead of being cut.
 MINIMUM_SIZE = (760, 520)
 NO_RESULT_WINDOWS = (
@@ -77,6 +77,9 @@ ONLINE_NOTE = (
     "version it was tested with. Nothing else is sent and nothing is downloaded by "
     "that. Help > Check for newer tool versions online switches it off. Files are "
     "downloaded from github.com only when you start an installation.")
+ACCEL_HINT = ("The acceleration curve of RawAccel is edited in the Acceleration card at "
+              "the bottom of the window (View > Acceleration… jumps there). Set it before "
+              "you calibrate.")
 WITHOUT_MOUSE = ("Without usbip-win2: import a values file exported by QuadSens on Linux "
                  "(File > Import values) or type the four multipliers, then Apply.")
 
@@ -153,6 +156,8 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
         layout.addWidget(self.steps_bar)
         layout.addWidget(self.mouse_panel)
         layout.addLayout(lower, 1)
+        # Full width below the two cards, so that the curve preview gets real width.
+        layout.addWidget(self.rawaccel_panel.accel_card)
         self.scroll = QtWidgets.QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
@@ -194,6 +199,8 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
             panel.profile_combo, *panel.spins, panel.use_button, panel.reset_button,
             panel.apply_button, panel.restore_button, panel.autostart_check,
             panel.flip_check,
+            # After the direction values and their Apply: the acceleration card.
+            *panel.accel_editor.tab_order(),
         ]
         for first, second in zip(order, order[1:]):
             QtWidgets.QWidget.setTabOrder(first, second)
@@ -202,7 +209,7 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
         self.update_steps()
         self.check_online()
         self.steps_bar.next_button.setFocus()
-        self.resize(*DEFAULT_SIZE)
+        fit_to_screen(self, *DEFAULT_SIZE)
         geometry = settings.value("window/geometry")
         if isinstance(geometry, QtCore.QByteArray) and not geometry.isEmpty():
             self.restoreGeometry(geometry)
@@ -225,6 +232,7 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
         file_menu.addAction(self.quit_action)
 
         self.build_view_menu()
+        self.add_accel_action(self.rawaccel_panel.open_accel_editor)
 
         help_menu = self.menuBar().addMenu("&Help")
         self.steps_action = QtGui.QAction("&First steps", self)
@@ -254,7 +262,7 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
     def show_first_steps(self) -> None:
         self._open_box("First steps", "<h3>First steps</h3><ol>%s</ol><p>%s</p>" % (
             "".join("<li>%s</li>" % html.escape(step) for step in FIRST_STEPS_WINDOWS),
-            html.escape(WITHOUT_MOUSE)))
+            html.escape(WITHOUT_MOUSE) + "</p><p>" + html.escape(ACCEL_HINT)))
 
     def show_setup_help(self) -> None:
         usbip, raw = win_tools.PINS[win_tools.USBIP], win_tools.PINS[win_tools.RAWACCEL]

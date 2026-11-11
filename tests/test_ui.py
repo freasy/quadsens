@@ -398,17 +398,15 @@ class MainWindowTest(unittest.TestCase):
         window = self.make_window()
         window.show()
         panel = window.driver_panel
-        self.assertEqual(panel.accel_toggle.summary(),
-                         "Acceleration: Classic, 0.05, 1.8; output cap 2")
-        self.assertEqual(panel.accel_toggle.accessibleDescription(),
+        self.assertEqual(panel.accel_text(),
                          "Acceleration: Classic, Acceleration 0.05, Exponent 1.8; "
                          "output cap 2; UseSmoothing off")
+        self.assertIn(panel.accel_text(), panel.indicator.accessibleName())
         # Changed in the driver's own program: the next look shows it.
         (self.params / "AccelerationMode").write_text("12\n")
         before["AccelerationMode"] = "12\n"
         panel.watch()
-        self.assertEqual(panel.accel_toggle.summary(),
-                         "Acceleration: mode 12 (not known to QuadSens)")
+        self.assertIn("Acceleration: mode 12 (not known to QuadSens)", panel.accel_text())
 
         started: list[tuple[str, str]] = []
         panel.launch = lambda program, folder: started.append((program, folder)) or True
@@ -444,22 +442,57 @@ class MainWindowTest(unittest.TestCase):
         return {name: (self.params / name).read_text().strip()
                 for name, _text in self.ACCEL_FILES}
 
-    def test_acceleration_editor_is_collapsed_and_costs_no_room(self) -> None:
+    def test_acceleration_card_is_always_there_below_the_two_cards(self) -> None:
         window = self.accel_window()
         panel = window.driver_panel
-        self.assertFalse(panel.accel_toggle.isChecked())
-        self.assertFalse(panel.accel_editor.isVisible())
-        self.assertEqual(panel.accel_toggle.summary(), "Acceleration: Linear, 0.1, 1.3; cap none")
+        editor = panel.accel_editor
+        card = panel.accel_card
+        _app.processEvents()
+        self.assertTrue(card.isVisible())
+        self.assertTrue(editor.isVisible())
+        self.assertEqual(card.accessibleName(), "Acceleration")
+        # A card of its own over the full width, under the calibration and driver cards.
+        self.assertGreater(card.y(), panel.geometry().bottom())
+        self.assertGreater(card.y(), window.calibration_panel.geometry().bottom())
+        self.assertGreaterEqual(card.width(),
+                                panel.width() + window.calibration_panel.width())
+        # Parameters left, the curve right, with real width for it.
+        self.assertGreater(editor.preview.x(), editor.mode_combo.geometry().right())
+        self.assertGreaterEqual(editor.preview.width(), 300)
+        self.assertGreaterEqual(editor.preview.height(), 170)
+        for name in ("accel_toggle", "accel_row", "accel_dialog", "accel_label"):
+            self.assertFalse(hasattr(panel, name), name)          # no disclosure, no dialog
+        self.assertEqual(panel.accel_text(), "Acceleration: Linear, Acceleration 0.1, "
+                                             "Midpoint 1.3; cap none; UseSmoothing on")
+        self.assertIn(panel.accel_text(), panel.indicator.accessibleName())
+        # The window names what it needs; below that the page scrolls, never sideways.
         hint = window.minimumSizeHint()
         widths.assert_fits(self, hint, widths.LINUX_FIT, window)
-        # Opened, the page scrolls instead of pushing the window off the screen.
-        panel.accel_toggle.setChecked(True)
+        self.assertEqual((window.minimumWidth(), window.minimumHeight()), (700, 480))
+        # At that minimum the page scrolls up and down only.
+        self.assertLessEqual(hint.width() + 20, 700 * widths.font_scale())
+        from quadsens.ui import main_window
+        self.assertEqual(main_window.DEFAULT_SIZE, (860, 930))
+        # ... never sideways at the default width.
+        widths.assert_fits(self, hint, (main_window.DEFAULT_SIZE[0] - 20, None), window)
+        # Keyboard: the direction values and their Apply first, then the acceleration.
+        order = window.tab_order
+        self.assertLess(order.index(panel.apply_button), order.index(editor.mode_combo))
+        self.assertLess(order.index(panel.spins[0]), order.index(editor.mode_combo))
+        self.assertLess(order.index(editor.mode_combo), order.index(editor.apply_button))
+        # The menu entry jumps there.
+        self.assertEqual(window.accel_action.text(), "&Acceleration…")
+        self.assertEqual(window.accel_action.shortcut().toString(), "Ctrl+Shift+A")
+        self.assertIn(window.accel_action, window.view_menu.actions())
+        window.activateWindow()
+        window.accel_action.trigger()
         _app.processEvents()
-        self.assertTrue(panel.accel_editor.isVisible())
-        self.assertGreater(window.minimumSizeHint().height(), hint.height() + 100)
-        self.assertLessEqual(window.minimumHeight(), 520)
+        self.assertTrue(editor.mode_combo.hasFocus() or _app.focusWidget() is None)
+        window.steps_action.trigger()
+        assert window.info_box is not None
+        self.assertIn("Acceleration card", window.info_box.text())
+        window.info_box.close()
         # The fork's own default is a capped line, and that is what the editor shows.
-        editor = panel.accel_editor
         self.assertEqual(editor.found().curve, accel_edit.make("linear", accel=0.1, cap=1.3))
         self.assertFalse(editor.apply_button.isEnabled())            # nothing edited yet
         self.assertIn("no changes", editor.change_label.text())
@@ -506,7 +539,7 @@ class MainWindowTest(unittest.TestCase):
                           + curve.describe(), panel.message.text())
             self.assertIn("does not report whether it accepted", panel.message.text())
         # The summary and the indicator follow what was read back.
-        self.assertIn("Jump", panel.accel_toggle.summary())
+        self.assertIn("Jump", panel.accel_text())
         self.assertIn("Acceleration: Jump", panel.indicator.detail.text())
         self.assertIn("Acceleration: Jump", panel.indicator.accessibleName())
         # One step back: the curve that was active before the last Apply.
@@ -552,9 +585,20 @@ class MainWindowTest(unittest.TestCase):
             editor = panel.accel_editor
             before = self.accel_state()
             self.assertFalse(editor.found().editable, name)
+            # The same card, with the reason and the way out in place of the inputs.
+            self.assertTrue(panel.accel_card.isVisible())
             self.assertFalse(editor.editing.isVisibleTo(editor))
+            self.assertTrue(editor.readonly_label.isVisibleTo(editor))
+            self.assertIn("Set outside what QuadSens edits", editor.readonly_label.text())
             self.assertIn(words, editor.readonly_label.text())
             self.assertIn("does not convert it", editor.readonly_label.text())
+            self.assertTrue(editor.settings_button.isVisibleTo(editor))
+            self.assertEqual(editor.settings_button.text(), "Open yeetmouse settings…")
+            started: list[str] = []
+            panel.find_gui = lambda: "/usr/bin/yeetmouse"
+            panel.launch = lambda program, folder: started.append(program) or True
+            editor.settings_button.click()
+            self.assertEqual(started, ["/usr/bin/yeetmouse"])
             self.assertFalse(editor.apply_button.isEnabled())
             panel.apply_accel(accel_edit.make("linear"))             # refused at the driver too
             self.assertIn("does not edit", panel.message.text())
@@ -1479,7 +1523,7 @@ class MainWindowTest(unittest.TestCase):
         window = self.make_window()
         window.driver_panel.advanced_toggle.setChecked(True)
         window.mouse_panel.log_toggle.setChecked(True)
-        window.resize(860, 760)
+        window.resize(860, 1200)
         window.show()
         self.feed_write(window)
         for _ in range(5):

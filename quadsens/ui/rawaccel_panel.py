@@ -187,26 +187,15 @@ class RawAccelPanel(Card):
         # The acceleration of the selected profile, read-only, and the way to
         # RawAccel's own window, where it is changed.
         self.accel = accel.Accel(accel.RAWACCEL, problem="no settings file")
-        self.accel_label = caption(ElideLabel())
-        self.accel_label.setAccessibleName("Acceleration of the selected profile")
-        self.settings_button = QtWidgets.QPushButton("Open RawAccel")
-        self.settings_button.setToolTip(
-            "Start RawAccel's own window (rawaccel.exe in this folder), where the "
-            "acceleration is changed. QuadSens only shows it.")
-        self.settings_button.clicked.connect(self.open_rawaccel)
         self.launch: Callable[[str, str], bool] = start_program     # replaced in tests
         # Editing the curve: collapsed until asked for; the summary stays.
         self.accel_editor = AccelEditor("RawAccel", ACCEL_NOTE)
         self.accel_editor.apply_requested.connect(self.apply_accel)
         self.accel_editor.revert_requested.connect(self.revert_accel)
-        self.accel_toggle = Disclosure("Acceleration", self.accel_editor)
-        self.accel_toggle.setToolTip(
-            "Show the acceleration editor: mode, parameters and a preview of the curve.")
-        accel_row = QtWidgets.QHBoxLayout()
-        accel_row.setSpacing(SPACE_M)
-        accel_row.addWidget(self.accel_label, 1)
-        accel_row.addWidget(self.accel_toggle)
-        accel_row.addWidget(self.settings_button)
+        self.accel_editor.settings_requested.connect(self.open_rawaccel)
+        # "Open RawAccel" lives in the acceleration card.
+        self.settings_button = self.accel_editor.settings_button
+        self.accel_card = self._make_accel_card()
         self.indicator = ActiveIndicator("RawAccel driver activity", wrap=True)
         self.autostart_check = QtWidgets.QCheckBox("Re-appl&y at Windows sign-in")
         self.autostart_check.setToolTip(AUTOSTART_TIP)
@@ -260,8 +249,7 @@ class RawAccelPanel(Card):
 
         for control in (self.choose_button, self.use_button, self.reset_button,
                         self.apply_button, self.restore_button, self.flip_check,
-                        self.advanced_toggle, self.autostart_check, self.settings_button,
-                        self.accel_toggle):
+                        self.advanced_toggle, self.autostart_check, self.settings_button):
             control.setAccessibleDescription(control.toolTip())
 
         self.message = MessageLabel("RawAccel message")
@@ -273,7 +261,6 @@ class RawAccelPanel(Card):
         layout.addLayout(head)
         layout.addLayout(folder_row)
         layout.addLayout(profile_row)
-        layout.addLayout(accel_row)
         layout.addLayout(tables)
         layout.addWidget(self.state_label)
         layout.addWidget(self.note_label)
@@ -285,7 +272,6 @@ class RawAccelPanel(Card):
         autostart_row.addWidget(self.autostart_check)
         autostart_row.addWidget(self.boot_label, 1)
         layout.addLayout(autostart_row)
-        layout.addWidget(self.accel_editor)
         layout.addWidget(self.advanced)
         layout.addStretch(1)
 
@@ -526,12 +512,25 @@ class RawAccelPanel(Card):
         self.accel_editor.set_can_revert(bool(self._stored_text("accel_previous")))
         self.accel_editor.set_busy(self.is_busy())
         text = self.accel.summary()
-        self.accel_label.setText(text)
-        self.accel_label.setAccessibleDescription(text)
-        self.accel_label.setToolTip(text + ". Read-only here; change it in RawAccel.")
         self.settings_button.setEnabled(self.folder is not None)
 
     # ---- editing the acceleration ---------------------------------------------------
+
+    def accel_text(self) -> str:
+        """The acceleration of the selected profile, in one line."""
+        return self.accel.summary()
+
+    def open_accel_editor(self) -> None:
+        """Put the keyboard into the acceleration card (View > Acceleration…)."""
+        self.accel_editor.focus_mode()
+
+    def _make_accel_card(self) -> Card:
+        """The "Acceleration" card: always visible; the window places it."""
+        card = Card("Acceleration")
+        layout = card.card_layout()
+        layout.addWidget(heading("Acceleration"))
+        layout.addWidget(self.accel_editor, 1)
+        return card
 
     def _stored_text(self, what: str) -> str:
         if self.document is None or self.folder is None:
@@ -585,6 +584,7 @@ class RawAccelPanel(Card):
                                     and self._stored("baseline") is None)
         except RawAccelError as exc:
             self.message.show_message(f"Nothing was changed: {exc}", error=True)
+            self.accel_editor.show_result(f"Nothing was changed: {exc}", error=True)
             self.reload()
             return
         if first_time:
@@ -675,8 +675,13 @@ class RawAccelPanel(Card):
         self._watch.start()
 
     def hideEvent(self, event: object) -> None:  # noqa: N802 (Qt name)
-        self._watch.stop()
-        super().hideEvent(event)        # type: ignore[arg-type]
+        # A window that is being destroyed hides its children too, and the timer
+        # may be gone by then. An exception here would end the program under PyQt.
+        try:
+            self._watch.stop()
+            super().hideEvent(event)    # type: ignore[arg-type]
+        except (RuntimeError, AttributeError):
+            pass
 
     # ---- loading the settings again at sign-in ------------------------------------
 
@@ -781,6 +786,10 @@ class RawAccelPanel(Card):
                     self._what, "The new values are in settings.json.")
         if self._backup is not None:
             what += f" The original file was kept as {self._backup.name}."
+        if self._what == "acceleration":
+            self.accel_editor.show_result(
+                ("✓ " if result.ok else "") + f"{what} {result.message}",
+                error=not result.ok and result.kind == rawaccel.FAILED)
         if result.ok:
             # RawAccel's writer accepted it: that, and when, is what the indicator
             # can say even where the driver cannot be read back.

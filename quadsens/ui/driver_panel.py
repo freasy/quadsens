@@ -32,7 +32,6 @@ from .status import (
     ElideLabel,
     Disclosure,
     MessageLabel,
-    SummaryDisclosure,
     WrapLabel,
     caption,
     column_header,
@@ -220,7 +219,8 @@ class DriverPanel(Card):
         self.accel_editor = AccelEditor("yeetmouse", ACCEL_NOTE)
         self.accel_editor.apply_requested.connect(self.apply_accel)
         self.accel_editor.revert_requested.connect(self.revert_accel)
-        self.accel_toggle = SummaryDisclosure("Acceleration", self.accel_editor)
+        self.accel_editor.settings_requested.connect(self.open_driver_settings)
+        self.accel_card = self._make_accel_card()
         self._accel_pending: accel_edit.Curve | None = None
         # Replaceable, so that tests start nothing.
         self.find_gui: Callable[[], str | None] = find_yeetmouse_gui
@@ -246,7 +246,7 @@ class DriverPanel(Card):
 
         for control in (self.use_button, self.flip_check, self.reset_button,
                         self.read_button, self.apply_button, self.auto_check,
-                        self.advanced_toggle, self.settings_button, self.accel_toggle):
+                        self.advanced_toggle, self.settings_button):
             control.setAccessibleDescription(control.toolTip())
 
         self.message = MessageLabel("Driver message")
@@ -266,11 +266,7 @@ class DriverPanel(Card):
 
         layout = self.card_layout()
         head = QtWidgets.QHBoxLayout()
-        # The summary of the acceleration is itself the button that opens the
-        # editor; it is shortened to the room there is.
-        head.setSpacing(SPACE_M)
-        head.addWidget(heading("Driver (yeetmouse)"))
-        head.addWidget(self.accel_toggle, 1)
+        head.addWidget(heading("Driver (yeetmouse)"), 1)
         head.addWidget(self.advanced_toggle)
         layout.addLayout(head)
         layout.addLayout(grid)
@@ -279,7 +275,6 @@ class DriverPanel(Card):
         layout.addWidget(self.indicator)
         layout.addWidget(self.message)
         layout.addWidget(self.advanced)
-        layout.addWidget(self.accel_editor)
         layout.addStretch(1)
 
         self.refresh()
@@ -396,17 +391,34 @@ class DriverPanel(Card):
         found = accel.read_yeetmouse(self._driver.params_dir, self._saver.config_path)
         changed = found != self.accel
         self.accel = found
-        self.accel_toggle.set_summary(found.short(), found.summary())
-        self.accel_editor.set_found(self._driver.accel_found(), keep_edits=True)
+        current = self._driver.accel_found()
+        self.accel_editor.set_found(current, keep_edits=True)
         self.accel_editor.set_can_revert(self._previous_accel() is not None)
         self.accel_editor.set_busy(self._process is not None)
-        self.accel_toggle.setToolTip(
-            found.summary() + ". Click to open the acceleration editor. This is what "
-            "the driver was set to; it applies no curve if it rejects these parameters, "
-            "and says so only in the kernel log.")
         return changed
 
     # ---- editing the acceleration ---------------------------------------------------
+
+    def accel_text(self) -> str:
+        """What the driver is set to, in one line (also part of the indicator)."""
+        return self.accel.summary()
+
+    def open_accel_editor(self) -> None:
+        """Put the keyboard into the acceleration card (View > Acceleration…)."""
+        self.accel_editor.focus_mode()
+
+    def _make_accel_card(self) -> Card:
+        """The "Acceleration" card: always visible; the window places it."""
+        card = Card("Acceleration")
+        layout = card.card_layout()
+        layout.addWidget(heading("Acceleration"))
+        layout.addWidget(self.accel_editor, 1)
+        return card
+
+    def _accel_message(self, text: str, error: bool = False) -> None:
+        """Say it in the card and in the editor window, wherever the eye is."""
+        self.message.show_message(text, error)
+        self.accel_editor.show_result(text, error)
 
     def _previous_accel(self) -> accel_edit.Curve | None:
         """The curve that was active before the last Apply acceleration, if known."""
@@ -439,7 +451,7 @@ class DriverPanel(Card):
             try:
                 command = self._driver.accel_helper_command(curve)
             except DriverError as exc:
-                self.message.show_message(str(exc), error=True)
+                self._accel_message(str(exc), error=True)
                 return
             self._accel_pending = curve
             self._accel_before = before
@@ -447,14 +459,14 @@ class DriverPanel(Card):
             self._start(command, self._accel_helper_finished, "pkexec could not be started.")
             return
         except DriverError as exc:
-            self.message.show_message(str(exc), error=True)
+            self._accel_message(str(exc), error=True)
             return
         self._accel_applied(curve, before, "directly")
 
     def revert_accel(self) -> None:
         previous = self._previous_accel()
         if previous is None:
-            self.message.show_message("There is no previous acceleration to go back to.")
+            self._accel_message("There is no previous acceleration to go back to.")
             return
         self.apply_accel(previous)
 
@@ -469,8 +481,7 @@ class DriverPanel(Card):
         if exit_code != 0:
             hint = (" If the helper is older than this QuadSens, install the current "
                     "helper/quadsens-apply (see README).") if exit_code == 2 else ""
-            self.message.show_message(describe_helper_failure(exit_code, stderr) + hint,
-                                      error=True)
+            self._accel_message(describe_helper_failure(exit_code, stderr) + hint, error=True)
             return
         self._accel_applied(curve, self._accel_before, "through pkexec")
 
@@ -485,7 +496,7 @@ class DriverPanel(Card):
         self.accel_editor.set_found(self._driver.accel_found())
         self.refresh()
         if differences:
-            self.message.show_message(
+            self._accel_message(
                 "Acceleration written %s, but the driver reads back differently: %s. Use "
                 "Revert to previous, or check the driver's own settings."
                 % (how, "; ".join(differences)), error=True)
@@ -493,7 +504,7 @@ class DriverPanel(Card):
                 "✕", "Acceleration: read-back differs from what was written",
                 "; ".join(differences), "error", "error")
             return
-        self.message.show_message(
+        self._accel_message(
             "✓ Acceleration written %s and read back: %s. The driver does not report "
             "whether it accepted the values; QuadSens checked them before writing. It "
             "takes effect with the next mouse movement, within a second."
@@ -545,8 +556,13 @@ class DriverPanel(Card):
         self._watch.start()
 
     def hideEvent(self, event: object) -> None:  # noqa: N802 (Qt name)
-        self._watch.stop()
-        super().hideEvent(event)        # type: ignore[arg-type]
+        # A window that is being destroyed hides its children too, and the timer
+        # may be gone by then. An exception here would end the program under PyQt.
+        try:
+            self._watch.stop()
+            super().hideEvent(event)    # type: ignore[arg-type]
+        except (RuntimeError, AttributeError):
+            pass
 
     def _values_edited(self, *_args: object) -> None:
         self._update_pending()

@@ -310,14 +310,13 @@ with the reason (module not loaded, not the fork), or *Cannot be verified*
 when the parameters are not readable for you. The driver check on top shows
 the same in short. Reading needs no extra rights and writes nothing.
 
-**Acceleration.** The head of the driver card shows the acceleration the
-driver is set to, for example "Acceleration: Linear, 0.05; cap none", read
-from the module parameters (or from `/etc/yeetmouse.conf` when the module
-cannot be read, which it then says). *Acceleration* next to it opens the
-editor; see [Editing the acceleration](#editing-the-acceleration). *Advanced >
-Open yeetmouse settings…* starts the driver's own settings program
-(`yeetmouse`, installed with the fork). A mode QuadSens does not know is
-shown by its number, not guessed.
+**Acceleration.** Below the two cards, the *Acceleration* card shows and
+edits the curve of the driver; see
+[Editing the acceleration](#editing-the-acceleration). The line under *Apply*
+names the acceleration the driver is set to as well, read from the module
+parameters. *Open yeetmouse settings…* (in that card and under *Advanced*)
+starts the driver's own settings program (`yeetmouse`, installed with the
+fork). A mode QuadSens does not know is shown by its number, not guessed.
 
 To calibrate again later, start at step 1; resetting the driver to 1.0 makes
 QuadSens wait for a new result.
@@ -577,12 +576,12 @@ values cannot be read back; the line then says *Sent to the driver HH:MM:SS,
 accepted by RawAccel's writer*, which is what is known, and *Not applied
 since Windows started* once Windows was restarted after that.
 
-**Acceleration.** Under the profile the card shows the acceleration of the
-selected profile as RawAccel's settings file names it. *Acceleration* opens
-the editor; see [Editing the acceleration](#editing-the-acceleration). *Open
-RawAccel* starts `rawaccel.exe` from the chosen folder. *Restore original*
-also puts the profile's original acceleration settings back, exactly as they
-were in the file.
+**Acceleration.** Below the two cards, the *Acceleration* card shows and
+edits the curve of the selected profile; see
+[Editing the acceleration](#editing-the-acceleration). *Open RawAccel* there
+starts `rawaccel.exe` from the chosen folder. *Restore original* in the
+RawAccel card also puts the profile's original acceleration settings back,
+exactly as they were in the file.
 
 **After a restart.** RawAccel's driver forgets its settings when Windows
 shuts down; they stay in `settings.json`. Tick *Re-apply at Windows sign-in*
@@ -614,8 +613,11 @@ time; that is expected for an unsigned program.
 below come from the drivers' sources and from a userspace build of the
 yeetmouse fork's code, not from a running driver.
 
-Both driver cards have an *Acceleration* disclosure, closed by default. It
-edits six modes that yeetmouse and RawAccel compute the same way once the
+Below the calibration and driver cards the window has an *Acceleration*
+card, always visible (*View > Acceleration…*, Ctrl+Shift+A, puts the keyboard
+there): mode and parameters on the left, the curve on the right. The window
+is taller for it (860x930 on Linux, 900x1080 on Windows, or what the screen
+offers); on a smaller screen the page scrolls. It edits six modes that yeetmouse and RawAccel compute the same way once the
 parameters are renamed:
 
 | Mode | Parameters |
@@ -660,7 +662,8 @@ on both systems, so that the same curves are available on both. The same
 checks are built into the pkexec helper, which does not trust its caller.
 
 **Everything else stays in the driver's own program.** If the driver is set
-to something outside these six modes, the editor is read-only and says why:
+to something outside these six modes, the card shows the reason and the
+button to the driver's own settings program in place of the inputs:
 on Linux another mode (Motivity, Synchronous, look-up table, custom curve),
 or `Offset`, `InputCap`, `OutputCap` or `PreScale` in use; on Windows
 separate curves per axis, `lpNorm` other than 2, weights, a speed cap,

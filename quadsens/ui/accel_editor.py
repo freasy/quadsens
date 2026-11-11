@@ -35,7 +35,7 @@ class CurvePreview(QtWidgets.QWidget):
         self._new: Curve | None = None
         self._current: Curve | None = None
         self._range = DEFAULT_RANGE
-        self.setMinimumSize(220, 150)
+        self.setMinimumSize(240, 170)
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                            QtWidgets.QSizePolicy.Policy.Expanding)
         self.setAccessibleName("Preview of the acceleration curve")
@@ -55,10 +55,12 @@ class CurvePreview(QtWidgets.QWidget):
 
     def lines(self) -> list[tuple[str, Curve]]:
         """What is drawn: ("new", curve) and, when it differs, ("current", curve)."""
+        if self._current is not None and self._current.same(self._new):
+            return [("current", self._current)]          # nothing edited: one line
         drawn: list[tuple[str, Curve]] = []
         if self._new is not None:
             drawn.append(("new", self._new))
-        if self._current is not None and not self._current.same(self._new):
+        if self._current is not None:
             drawn.append(("current", self._current))
         return drawn
 
@@ -146,7 +148,7 @@ class CurvePreview(QtWidgets.QWidget):
                     path.moveTo(spot)
                 else:
                     path.lineTo(spot)
-            new = name == "new"
+            new = name == "new" or len(lines) == 1
             pen = QtGui.QPen(accent if new else text, 2.2 if new else 1.4)
             if not new:
                 pen.setStyle(QtCore.Qt.PenStyle.DashLine)
@@ -172,7 +174,7 @@ class CurvePreview(QtWidgets.QWidget):
         key_left = max(plot.right() - key_width, plot.left())
         y = plot.bottom() - (len(lines) - 1) * (metrics.height() + 2) - 6
         for name, _curve in lines:
-            new = name == "new"
+            new = name == "new" or len(lines) == 1
             pen = QtGui.QPen(accent if new else text, 2.2 if new else 1.4)
             if not new:
                 pen.setStyle(QtCore.Qt.PenStyle.DashLine)
@@ -181,6 +183,7 @@ class CurvePreview(QtWidgets.QWidget):
                              QtCore.QPointF(key_left + 26, y - metrics.height() / 3))
             painter.setPen(text)
             painter.drawText(QtCore.QPointF(key_left + 32, y),
+                             "current" if len(lines) == 1 else
                              "new (solid)" if new else "current (dashed)")
             y += metrics.height() + 2
         painter.end()
@@ -205,8 +208,7 @@ class _Page(QtWidgets.QWidget):
         grid.setColumnStretch(1, 1)
         row = 0
         if mode == ae.OFF:
-            grid.addWidget(caption(QtWidgets.QLabel(ae.MODE_HELP[ae.OFF])), 0, 0, 1, 2)
-            return
+            return                      # nothing to set; the line above says what Off is
         for field in ae.FIELDS[mode]:
             spin = self._spin(field, driver)
             label = QtWidgets.QLabel(field.label + ":")
@@ -281,6 +283,7 @@ class _Page(QtWidgets.QWidget):
 class AccelEditor(QtWidgets.QWidget):
     apply_requested = Signal(object)        # the Curve to write
     revert_requested = Signal()
+    settings_requested = Signal()           # open the driver's own settings program
     edited = Signal()
 
     def __init__(self, driver: str, direction_note: str,
@@ -328,6 +331,8 @@ class AccelEditor(QtWidgets.QWidget):
         self.readonly_label = MessageLabel("Why the acceleration cannot be edited here")
         self.change_label = WrapLabel("Current and new acceleration")
         self.problem_label = MessageLabel("Why this curve is not allowed")
+        self.result_label = MessageLabel("What the last Apply or Revert came to")
+        self.result_label.hide()
         self.note_label = caption(WrapLabel("About acceleration and the directional values"))
         self.note_label.setText(direction_note + " " + CHANGE_NOTE)
         self.apply_button = QtWidgets.QPushButton("Apply acceleration")
@@ -341,39 +346,62 @@ class AccelEditor(QtWidgets.QWidget):
         self.reset_button.setToolTip("Drop the edits and show the acceleration that is "
                                      "active now.")
         self.reset_button.clicked.connect(self.show_current)
-        for control in (self.apply_button, self.revert_button, self.reset_button):
+
+        self.settings_button = QtWidgets.QPushButton(
+            "Open RawAccel" if driver == "RawAccel" else "Open %s settings…" % driver)
+        self.settings_button.setToolTip(
+            "Start the settings program of %s itself, for everything QuadSens does not "
+            "edit." % driver)
+        self.settings_button.clicked.connect(self.settings_requested.emit)
+        for control in (self.apply_button, self.revert_button, self.reset_button,
+                        self.settings_button):
             control.setAccessibleDescription(control.toolTip())
 
-        controls = QtWidgets.QGridLayout()
-        controls.setHorizontalSpacing(SPACE_M)
-        controls.setVerticalSpacing(SPACE_S)
-        controls.addWidget(mode_label, 0, 0)
-        controls.addWidget(self.mode_combo, 0, 1)
-        controls.addWidget(range_label, 0, 2)
-        controls.addWidget(self.range_combo, 0, 3)
-        controls.setColumnStretch(1, 1)
-        buttons = QtWidgets.QHBoxLayout()
-        buttons.setSpacing(SPACE_M)
-        buttons.addWidget(self.apply_button)
-        buttons.addWidget(self.revert_button)
-        buttons.addWidget(self.reset_button)
-        buttons.addStretch(1)
+        # Left: what is set. Right: what it looks like.
+        mode_row = QtWidgets.QHBoxLayout()
+        mode_row.setSpacing(SPACE_M)
+        mode_row.addWidget(mode_label)
+        mode_row.addWidget(self.mode_combo, 1)
+        buttons = QtWidgets.QGridLayout()
+        buttons.setHorizontalSpacing(SPACE_M)
+        buttons.setVerticalSpacing(SPACE_S)
+        buttons.addWidget(self.apply_button, 0, 0)
+        buttons.addWidget(self.revert_button, 0, 1)
+        buttons.addWidget(self.reset_button, 1, 0)
+        buttons.addWidget(self.settings_button, 1, 1)
         self.editing = QtWidgets.QWidget()
         editing = QtWidgets.QVBoxLayout(self.editing)
         editing.setContentsMargins(0, 0, 0, 0)
         editing.setSpacing(SPACE_S)
-        editing.addLayout(controls)
+        editing.addLayout(mode_row)
         editing.addWidget(self.mode_help)
         editing.addWidget(self.stack)
-        editing.addWidget(self.preview, 1)
-        editing.addWidget(self.change_label)
-        editing.addWidget(self.problem_label)
-        editing.addLayout(buttons)
+        editing.addStretch(1)
+        left = QtWidgets.QVBoxLayout()
+        left.setSpacing(SPACE_S)
+        left.addWidget(self.readonly_label)
+        left.addWidget(self.editing, 1)
+        left.addWidget(self.change_label)
+        left.addWidget(self.problem_label)
+        left.addLayout(buttons)
+        left.addWidget(self.result_label)
+        range_row = QtWidgets.QHBoxLayout()
+        range_row.setSpacing(SPACE_M)
+        range_row.addWidget(range_label)
+        range_row.addWidget(self.range_combo)
+        range_row.addStretch(1)
+        right = QtWidgets.QVBoxLayout()
+        right.setSpacing(SPACE_S)
+        right.addLayout(range_row)
+        right.addWidget(self.preview, 1)
+        columns = QtWidgets.QHBoxLayout()
+        columns.setSpacing(SPACE_M * 2)
+        columns.addLayout(left, 2)
+        columns.addLayout(right, 3)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(SPACE_S)
-        layout.addWidget(self.readonly_label)
-        layout.addWidget(self.editing)
+        layout.addLayout(columns, 1)
         layout.addWidget(self.note_label)
 
         self.mode_combo.currentIndexChanged.connect(self._mode_changed)
@@ -396,6 +424,11 @@ class AccelEditor(QtWidgets.QWidget):
     def problems(self) -> list[str]:
         return ae.violations(self.curve())
 
+    def show_result(self, text: str, error: bool = False) -> None:
+        """What the card reported for the last Apply or Revert, shown here as well."""
+        self.result_label.show_message(text, error)
+        self.result_label.setVisible(bool(text))
+
     def set_busy(self, busy: bool) -> None:
         self._busy = busy
         self._refresh()
@@ -415,6 +448,20 @@ class AccelEditor(QtWidgets.QWidget):
     def show_current(self) -> None:
         if self._found.curve is not None:
             self.set_curve(self._found.curve)
+
+    def focus_mode(self) -> None:
+        """Put the keyboard on the mode picker (or on the way out, when read-only)."""
+        target = self.mode_combo if self._found.editable else self.settings_button
+        target.setFocus(QtCore.Qt.FocusReason.ShortcutFocusReason)
+
+    def tab_order(self) -> list[QtWidgets.QWidget]:
+        spins: list[QtWidgets.QWidget] = []
+        for page in self.pages.values():
+            spins += list(page.spins.values())
+            spins += [w for w in (page.cap_check, page.cap_spin, page.gain_check)
+                      if w is not None]
+        return [self.mode_combo, *spins, self.apply_button, self.revert_button,
+                self.reset_button, self.settings_button, self.range_combo]
 
     def set_curve(self, curve: Curve) -> None:
         index = ae.MODES.index(curve.mode)
@@ -442,11 +489,17 @@ class AccelEditor(QtWidgets.QWidget):
         self.editing.setVisible(found.editable)
         self.readonly_label.setVisible(not found.editable)
         self.revert_button.setEnabled(self._can_revert and not self._busy)
+        self.change_label.setVisible(found.editable)
         if not found.editable:
             self.readonly_label.show_message(
-                "Read-only here: %s Change it in the settings program of %s; QuadSens "
-                "does not convert it." % (found.reason, self._driver), kind="warning")
+                "Set outside what QuadSens edits: %s Change it in the settings program of "
+                "%s; QuadSens does not convert it." % (found.reason, self._driver),
+                kind="warning")
             self.apply_button.setEnabled(False)
+            self.reset_button.setEnabled(False)
+            self.problem_label.setVisible(False)
+            # Nothing to draw: a configuration outside the six modes has no curve here.
+            self.preview.set_curves(None, None)
             self.setAccessibleDescription("Acceleration is read-only. " + found.reason)
             return
         curve = self.curve()

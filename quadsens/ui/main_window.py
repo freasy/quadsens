@@ -18,6 +18,7 @@ from ..emulator import (
 )
 from ..calibration import NO_RESULT_FOLDER, result_folder
 from ..hints import (
+    ACCEL_HINT,
     FIRST_STEPS,
     PERSIST,
     setup_problems,
@@ -38,11 +39,11 @@ from .status import SPACE_L, SPACE_M
 from .steps_bar import StepsBar
 from .theme import ThemeManager, set_primary, stored_mode
 from .values_io import ValuesIO
-from .window_common import WindowCommon, about_html  # noqa: F401 (about_html re-exported)
+from .window_common import WindowCommon, about_html, fit_to_screen  # noqa: F401 (about_html re-exported)
 
-DEFAULT_SIZE = (860, 600)
+DEFAULT_SIZE = (860, 930)       # everything visible; smaller screens scroll
 # Below the size at which everything fits, the page scrolls instead of being cut.
-MINIMUM_SIZE = (640, 480)
+MINIMUM_SIZE = (700, 480)       # wide enough for the page beside its scroll bar
 
 
 class MainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
@@ -97,9 +98,10 @@ class MainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
         layout.addWidget(self.steps_bar)
         layout.addWidget(self.mouse_panel)
         layout.addLayout(self._lower)
-        # The page scrolls when it does not fit, which happens once the
-        # acceleration editor is opened on a small screen. Collapsed, it fits
-        # the size minimumSizeHint() names.
+        # Full width below the two cards, so that the curve preview gets real width.
+        layout.addWidget(self.driver_panel.accel_card)
+        # The page scrolls when the window is smaller than what it needs
+        # (minimumSizeHint() names that size).
         self.scroll = QtWidgets.QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
@@ -143,6 +145,8 @@ class MainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
             self.driver_panel.read_button, self.driver_panel.apply_button,
             self.driver_panel.save_button,
             self.driver_panel.flip_check, self.driver_panel.auto_check,
+            # After the direction values and their Apply: the acceleration card.
+            *self.driver_panel.accel_editor.tab_order(),
         ]
         for first, second in zip(order, order[1:]):
             QtWidgets.QWidget.setTabOrder(first, second)
@@ -153,7 +157,7 @@ class MainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
         self._share_space(self.mouse_panel.log_shown())
         self.update_steps()
         self.check_driver()
-        self.resize(*DEFAULT_SIZE)
+        fit_to_screen(self, *DEFAULT_SIZE)
         geometry = settings.value("window/geometry")
         if isinstance(geometry, QtCore.QByteArray) and not geometry.isEmpty():
             self.restoreGeometry(geometry)
@@ -181,6 +185,7 @@ class MainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
         file_menu.addAction(self.quit_action)
 
         self.build_view_menu()
+        self.add_accel_action(self.driver_panel.open_accel_editor)
 
         help_menu = self.menuBar().addMenu("&Help")
         self.steps_action = QtGui.QAction("&First steps", self)
@@ -211,7 +216,7 @@ class MainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
     def show_first_steps(self) -> None:
         self._open_box("First steps", "<h3>First steps</h3><ol>%s</ol><p>%s</p>" % (
             "".join("<li>%s</li>" % html.escape(step) for step in FIRST_STEPS),
-            html.escape(PERSIST)))
+            html.escape(PERSIST) + "</p><p>" + html.escape(ACCEL_HINT)))
 
     def setup_problems(self) -> list[str]:
         """Everything that is not set up yet, each with what to do about it."""

@@ -448,7 +448,7 @@ def check_renders(directory: Path | None, mode: str) -> None:
                 Driver(params), None, uhid_path=str(uhid),
                 saver=Saver(config, tool=ROOT / "tests" / "fake_yeetmousectl.py"),
                 setup_probe=demo_probe(Path(tmp, "machine"), **options))
-            for size, suffix in (((860, 600), ""), ((720, 520), "-min")):
+            for size, suffix in (((860, 930), ""), ((720, 520), "-min")):
                 if doc_only and suffix:
                     continue
                 window.resize(*size)
@@ -495,7 +495,7 @@ class _DemoUsbip:
         self.client.reply()
 
 
-def windows_render(output: Path, mode: str, size: tuple[int, int] = (900, 780),
+def windows_render(output: Path, mode: str, size: tuple[int, int] = (900, 1080),
                    missing: bool = False) -> None:
     """The Windows composition with fixture data.
 
@@ -789,7 +789,7 @@ def main(argv: list[str]) -> int:
                     else "screenshot-system-dark.png" if dark
                     else "screenshot-system-light.png")
     output = Path(argv[1]) if len(argv) > 1 else ROOT / "docs" / default_name
-    width, height = (int(n) for n in (argv[2] if len(argv) > 2 else "860x600").split("x"))
+    width, height = (int(n) for n in (argv[2] if len(argv) > 2 else "860x930").split("x"))
     QtCore.QLocale.setDefault(QtCore.QLocale.c())
     app = QtWidgets.QApplication([argv[0]])
     if dark:
@@ -806,7 +806,7 @@ def main(argv: list[str]) -> int:
         for name, text in (("AccelerationMode", "1"), ("Acceleration", "0.05"),
                            ("Exponent", "1.8"), ("Midpoint", "1.3"), ("Motivity", "1.5"),
                            ("Offset", "0"), ("InputCap", "0"), ("OutputCap", "0"),
-                           ("UseSmoothing", "0")):
+                           ("UseSmoothing", "0"), ("PreScale", "1")):
             (params / name).write_text(text + "\n")
         uhid = Path(tmp, "uhid")  # a plain file: "writable", but never opened
         uhid.write_bytes(b"")
