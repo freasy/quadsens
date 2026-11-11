@@ -11,7 +11,8 @@ patched yeetmouse kernel module.
 
 ![QuadSens main window](docs/screenshot.png)
 
-The screenshot shows fixture data. A dark-theme rendering is in
+The screenshot shows fixture data, after *Use result* and *Apply*, with
+*Save to config* as the next step. A dark-theme rendering is in
 [docs/screenshot-dark.png](docs/screenshot-dark.png).
 
 ## How it works
@@ -21,14 +22,17 @@ The screenshot shows fixture data. A dark-theme rendering is in
    mouse's configuration protocol, which is what makes Aimlabs offer its
    per-direction sensitivity calibration (called PureVector or OmniSense
    there). The device never moves the pointer.
-2. **Calibration result.** The calibration produces four multipliers (right,
-   left, down, up) and eight compass values. QuadSens reads them from the
-   result file Aimlabs writes (`ASFSettings.json` in its Proton prefix) and
-   from what Aimlabs sends to the virtual mouse, and shows both side by side.
+2. **Calibration result.** The calibration measures eight directions and
+   reduces them to four multipliers (right, left, down, up). QuadSens reads
+   them from the result file Aimlabs writes (`ASFSettings.json` in its Proton
+   prefix) and from what Aimlabs sends to the virtual mouse, and shows the
+   four multipliers as a diagram with their deviation from 1.0 in percent.
 3. **Driver.** QuadSens writes the four multipliers to the `DirScaleXPos`,
    `DirScaleXNeg`, `DirScaleYPos` and `DirScaleYNeg` parameters of the patched
    yeetmouse module. It writes directly if your user is in group `yeetmouse`,
-   otherwise through one `pkexec` call of a small helper script.
+   otherwise through one `pkexec` call of a small helper script. *Save to
+   config* then stores them in `/etc/yeetmouse.conf` with the fork's
+   `yeetmousectl`, so that they survive a module reload.
 
 ## Requirements
 
@@ -39,13 +43,15 @@ The screenshot shows fixture data. A dark-theme rendering is in
   Its
   [DIRECTIONAL_SCALING.md](https://github.com/freasy/YeetMouse/blob/feature/directional-scalars/DIRECTIONAL_SCALING.md)
   explains the parameters and the installation. The unmodified yeetmouse does
-  not have these parameters.
+  not have these parameters, and its `yeetmousectl` does not save them; install
+  the fork's userspace tools along with the module.
 - Aimlabs, installed through Steam and run with Proton.
 - Read/write access to `/dev/uhid` for your user (see
   [One-time setup](#one-time-setup)).
 - Only for running from source: Python 3.10 or newer with PySide6. PyQt6 is
   used as a fallback if PySide6 is missing. The binary needs neither.
-- Only for the `pkexec` fallback: polkit.
+- polkit (`pkexec`), for *Save to config* unless the config file is writable
+  for you, and for the *Apply* fallback.
 
 ## Install
 
@@ -151,6 +157,24 @@ only from a system location (`/usr/local/libexec`, `/usr/libexec` or
 `helper/quadsens-apply` in the checkout. Without group membership the current
 driver values cannot be read, so QuadSens cannot confirm what it wrote.
 
+### Saving to the config file
+
+*Save to config* runs the fork's `yeetmousectl save /etc/yeetmouse.conf`,
+which writes the values the driver currently uses to the file that
+`yeetmouse.service` applies at start. It needs the `yeetmousectl` of the fork
+in `/usr/bin`, `/usr/local/bin` or `/bin`; the unmodified tool leaves the
+directional values out. QuadSens reads the file back after saving and tells
+you if they are missing.
+
+`/etc/yeetmouse.conf` normally belongs to root, so the save asks for
+authorization through `pkexec` (polkit). To save without a password prompt,
+make the file writable for group `yeetmouse` once:
+
+```sh
+sudo chgrp yeetmouse /etc/yeetmouse.conf
+sudo chmod 664 /etc/yeetmouse.conf
+```
+
 ### Steam launch option
 
 Proton has to pass the virtual device through to the game. Set this launch
@@ -165,37 +189,51 @@ the *Product ID* box, use the same value here.
 
 ## Usage
 
-1. Start QuadSens and press *Start virtual mouse*. The status next to the
-   button changes to "Running: waiting for a client".
-2. In the *Driver* panel press *Reset to 1.0* and then *Apply*, so that all
-   four values are 1 and the calibration measures the unscaled mouse.
-3. Start Aimlabs. The status changes to "Running: device opened by a client"
-   once the game has found the virtual mouse.
-4. In Aimlabs open the Mouselabs section and run the per-direction
-   sensitivity calibration with your real mouse.
-5. Back in QuadSens the *Calibration* panel shows the result: the four
-   multipliers from the result file, the values written to the virtual mouse
-   and a compass plot of the eight directional values. The command log marks
-   the relevant lines with `>>> DIRECTIONAL WRITE`.
-6. Press *Use calibration*. The four new values are filled in and the changed
-   rows are marked as unsaved.
-7. Press *Apply*. The *Driver reports* column shows what the module now uses.
-8. If up and down feel swapped afterwards, tick *Flip Y* and press *Apply*
-   again.
-9. Values applied this way last until the module is reloaded or the machine
-   reboots. To keep them, save the driver's current values with the fork's
-   tool:
+The row on top of the window shows six steps. Each is marked as done (✓),
+current (▶) or pending (○), and the button on the right always carries out the
+current one (Ctrl+Return). The steps are worked out from what QuadSens finds,
+not from what you clicked, and nothing is locked: the buttons in the panels
+work in any order.
 
-   ```sh
-   sudo yeetmousectl save /etc/yeetmouse.conf
-   ```
+1. **Start mouse.** Press *Start virtual mouse*. The status next to the button
+   changes to "Running: waiting for a client". Then start Aimlabs; the status
+   changes to "Running: device opened by a client" once the game has found
+   the virtual mouse.
+2. **Reset to 1.0.** If the driver holds other values, press *Reset to 1.0 and
+   apply*, so that the calibration measures the unscaled mouse. The step is
+   done when all four driver values are exactly 1.
+3. **Calibrate.** In Aimlabs open the Mouselabs section and run the
+   per-direction sensitivity calibration with your real mouse. QuadSens
+   notices the result on its own, either as a result file newer than the
+   mouse start or as values sent to the virtual mouse. The diagram under
+   *Calibration result* then shows the four multipliers with their deviation
+   from 1.0; *Measured values* shows the raw numbers, including the eight
+   measured directions.
+4. **Use result.** Press *Use result*. The four new values are filled in and
+   the changed rows are marked as unsaved.
+5. **Apply.** Press *Apply*. The *Driver reports* column shows what the module
+   now uses.
+6. **Save.** Press *Save to config*. Until then the panel says "Applied, not
+   saved: lost on module reload"; afterwards "Saved to config". See
+   [Saving to the config file](#saving-to-the-config-file).
 
-   `yeetmouse.service` applies that file at boot.
+To calibrate again later, start at step 1; resetting the driver to 1.0 makes
+QuadSens wait for a new result.
 
-*Apply saved on start* makes QuadSens write the last applied values again
-whenever it starts. *File > Open result folder* (Ctrl+O) opens the folder of
-the result file, and *Help > First steps* (F1) shows this procedure in the
-application.
+Less common controls:
+
+- *Show protocol log* shows every command the virtual mouse received. The line
+  next to it names the last event that matters, for example that a
+  calibration value arrived.
+- *Advanced* in the driver panel holds *Flip Y* and *Apply saved values on
+  start*. *Flip Y* exchanges the down and up values. The default mapping has
+  been verified against real results, so leave it off unless up and down feel
+  swapped on your setup. *Apply saved values on start* makes QuadSens write
+  the last applied values again whenever it starts; it is not needed once the
+  values are saved to the config.
+- *File > Open result folder* (Ctrl+O) opens the folder of the result file.
+  *Help > First steps* (F1) shows the steps, and *Help > Setup help* lists
+  what is not set up yet together with the commands to fix it.
 
 The virtual mouse can also be run without the window:
 `python3 -m quadsens.emulator` (options: `--pid`, `--state`, `--layout`).
@@ -212,6 +250,8 @@ state of the virtual mouse in
 - No real hardware is modified. Nothing is written to any physical mouse.
 - No game files are modified. QuadSens reads one result file and never writes
   to the game's directories.
+- The only system file it changes is `/etc/yeetmouse.conf`, and only when you
+  press *Save to config*; the writing is done by `yeetmousectl`.
 - Presenting a virtual device to software that expects particular hardware may
   be against the terms of the software it interoperates with. Checking that is
   your responsibility.
@@ -223,10 +263,12 @@ state of the virtual mouse in
 
 - Tested end to end on one machine: Manjaro, KDE Plasma, Aimlabs under Steam
   Proton. Other distributions, desktops and Proton versions are untested.
-- Which of the calibration's two Y values means "down" is not confirmed. The
-  *Flip Y* toggle exchanges them.
-- Only the four axis multipliers reach the driver. The eight compass values
-  are displayed but not applied.
+- The Y mapping is verified on that machine: the calibration's `YNeg` is the
+  average of the upward directions and goes to the driver's "up" value. The
+  *Flip Y* switch under *Advanced* exists only for setups where up and down
+  still feel swapped.
+- The driver takes four multipliers. The eight measured directions are
+  displayed but not applied.
 - New values are entered with four decimals.
 - The virtual device is built from an analysis of the protocol. A future
   version of the game or of Proton may stop accepting it.
@@ -269,8 +311,15 @@ You are not in group `yeetmouse` and the helper is not installed system-wide.
 Do one of the two (see [One-time setup](#one-time-setup)).
 
 **The values are back to 1 after a reboot.**
-They were applied but not saved. Run `sudo yeetmousectl save
-/etc/yeetmouse.conf` after applying, or tick *Apply saved on start*.
+They were applied but not saved. Apply them again and press *Save to config*.
+
+**Save to config is greyed out.**
+`yeetmousectl` was not found in `/usr/bin`, `/usr/local/bin` or `/bin`.
+Install the userspace tools of the yeetmouse fork.
+
+**Save to config reports "Nothing directional was saved".**
+The installed `yeetmousectl` is the unmodified one, which does not know the
+directional values. Install the fork's tools and save again.
 
 ## Development
 
@@ -280,7 +329,8 @@ Run the tests from the repository root:
 QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests -t .
 ```
 
-The tests never open `/dev/uhid`, run `pkexec` or write to `/sys`. The UI
+The tests never open `/dev/uhid`, run `pkexec` or write to `/sys` or `/etc`;
+`tests/fake_yeetmousectl.py` stands in for the save tool. The UI
 tests are skipped when no Qt binding is installed. To regenerate the
 screenshots from fixture data:
 
@@ -296,6 +346,8 @@ quadsens/              application package
   emulator.py          virtual HID mouse and protocol (no Qt)
   calibration.py       find and parse the result file (no Qt)
   driver.py            read and write the module parameters (no Qt)
+  persist.py           save to the config file and verify it (no Qt)
+  steps.py             the six guided steps, derived from state (no Qt)
   model.py             value types and number parsing (no Qt)
   hints.py, about.py   user-facing texts (no Qt)
   resources.py         locate bundled files (no Qt)
