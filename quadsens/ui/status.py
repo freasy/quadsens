@@ -175,6 +175,12 @@ class ElideLabel(QtWidgets.QLabel):
         self.update()
 
 
+def start_program(program: str, folder: str = "") -> bool:
+    """Start a settings program on its own, detached from QuadSens. True if it started."""
+    started = QtCore.QProcess.startDetached(program, [], folder)
+    return bool(started[0] if isinstance(started, tuple) else started)
+
+
 class ActiveIndicator(QtWidgets.QFrame):
     """Says whether the driver is applying the values: mark, headline, one line of detail.
 

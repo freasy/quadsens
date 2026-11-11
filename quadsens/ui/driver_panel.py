@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import time
 from collections.abc import Callable
 
-from .. import active_linux
+from .. import accel, active_linux
 from ..calibration import Result, driver_scalars
 from ..driver import (
     PARAM_NAMES,
@@ -32,12 +34,22 @@ from .status import (
     caption,
     column_header,
     heading,
+    start_program,
 )
 
 # Mouse direction each parameter scales; the driver's +Y is "down".
 DIRECTIONS: tuple[str, ...] = ("right", "left", "down", "up")
 ROW_TITLES: tuple[str, ...] = ("→ &Right:", "← &Left:", "↓ &Down:", "↑ &Up:")
 NO_VALUE = "–"
+def find_yeetmouse_gui() -> str | None:
+    """The fork's settings program: on PATH, or where its Makefile installs it."""
+    found = shutil.which(accel.YEETMOUSE_GUI)
+    if found:
+        return found
+    fixed = "/usr/bin/" + accel.YEETMOUSE_GUI
+    return fixed if os.path.isfile(fixed) and os.access(fixed, os.X_OK) else None
+
+
 WATCH_MS = 3000          # how often the driver is read again while the card is visible
 DECIMALS = 4
 # Half a step of the last digit shown: closer than this is "the same value".
@@ -190,11 +202,30 @@ class DriverPanel(Card):
             bool(settings.value("driver/apply_on_start", False, type=bool)))
         self.auto_check.toggled.connect(
             lambda checked: settings.setValue("driver/apply_on_start", checked))
+        # The acceleration the driver is set to, read-only: in short in the head
+        # of the card, in full here, with the way to the driver's own settings.
+        self.accel = accel.Accel(accel.YEETMOUSE, problem="not read yet")
+        self.accel_label = caption(ElideLabel())
+        self.accel_label.setAccessibleName("Acceleration the driver is set to")
+        self.settings_button = QtWidgets.QPushButton("Open yeetmouse settings…")
+        self.settings_button.setToolTip(
+            "Start the settings program of the driver (yeetmouse), where the "
+            "acceleration is changed. QuadSens only shows it.")
+        self.settings_button.clicked.connect(self.open_driver_settings)
+        # Replaceable, so that tests start nothing.
+        self.find_gui: Callable[[], str | None] = find_yeetmouse_gui
+        self.launch: Callable[[str, str], bool] = start_program
         self.advanced = QtWidgets.QWidget()
         advanced_layout = QtWidgets.QVBoxLayout(self.advanced)
         advanced_layout.setContentsMargins(SPACE_M * 2, 0, 0, 0)
         advanced_layout.setSpacing(SPACE_S)
-        advanced_layout.addWidget(self.flip_check)
+        # The button shares the line of the first switch, so that it costs no height.
+        first_row = QtWidgets.QHBoxLayout()
+        first_row.setSpacing(SPACE_M)
+        first_row.addWidget(self.flip_check)
+        first_row.addStretch(1)
+        first_row.addWidget(self.settings_button)
+        advanced_layout.addLayout(first_row)
         advanced_layout.addWidget(self.flip_hint)
         advanced_layout.addWidget(self.auto_check)
         self.advanced_toggle = Disclosure("Ad&vanced", self.advanced)
@@ -205,7 +236,7 @@ class DriverPanel(Card):
 
         for control in (self.use_button, self.flip_check, self.reset_button,
                         self.read_button, self.apply_button, self.auto_check,
-                        self.advanced_toggle):
+                        self.advanced_toggle, self.settings_button):
             control.setAccessibleDescription(control.toolTip())
 
         self.message = MessageLabel("Driver message")
@@ -225,7 +256,9 @@ class DriverPanel(Card):
 
         layout = self.card_layout()
         head = QtWidgets.QHBoxLayout()
-        head.addWidget(heading("Driver (yeetmouse)"), 1)
+        head.setSpacing(SPACE_M)
+        head.addWidget(heading("Driver (yeetmouse)"))
+        head.addWidget(self.accel_label, 1)
         head.addWidget(self.advanced_toggle)
         layout.addLayout(head)
         layout.addLayout(grid)
@@ -340,9 +373,39 @@ class DriverPanel(Card):
         self.save_state = self._saver.state(self.driver_values())
         self._update_pending()
         self._update_indicator()
+        self._update_accel()
         self.changed.emit()
         self.driver_read.emit()
         return state
+
+    def _update_accel(self) -> bool:
+        """Read the acceleration settings again; True if they changed."""
+        found = accel.read_yeetmouse(self._driver.params_dir, self._saver.config_path)
+        changed = found != self.accel
+        self.accel = found
+        self.accel_label.setText(found.short())
+        self.accel_label.setAccessibleDescription(found.summary())
+        self.accel_label.setToolTip(
+            found.summary() + ". Read-only here; change it in the driver's own settings "
+            "(Advanced > Open yeetmouse settings). This is what the driver was set to; "
+            "it applies no curve if it rejects these parameters, and says so only in "
+            "the kernel log.")
+        return changed
+
+    def open_driver_settings(self) -> None:
+        """Start the driver's own settings program, or say how to get it."""
+        program = self.find_gui()
+        if program is None:
+            self.message.show_message(
+                "The settings program of the driver (%s) was not found. It is installed "
+                "together with the fork (make install, or its package); see the README "
+                "of the driver." % accel.YEETMOUSE_GUI)
+        elif self.launch(program, ""):
+            self.message.show_message(
+                "Started %s. What you change there shows up here within a few seconds."
+                % program)
+        else:
+            self.message.show_message("%s could not be started." % program, error=True)
 
     def _update_indicator(self) -> None:
         self.active = shown = active_linux.linux_indicator(
@@ -364,6 +427,8 @@ class DriverPanel(Card):
             return
         if self._driver.read() != self.state:
             self.refresh()
+        else:
+            self._update_accel()
 
     def showEvent(self, event: object) -> None:  # noqa: N802 (Qt name)
         super().showEvent(event)        # type: ignore[arg-type]

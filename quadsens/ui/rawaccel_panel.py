@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
-from .. import active, rawaccel, rawaccel_live, win_autostart
+from .. import accel, active, rawaccel, rawaccel_live, win_autostart
 from ..calibration import Result, driver_scalars
 from ..model import SCALE_MAX, SCALE_MIN, Scalars
 from ..rawaccel import Four, RawAccelError
@@ -25,6 +25,7 @@ from .status import (
     caption,
     column_header,
     heading,
+    start_program,
 )
 
 ROW_TITLES: tuple[str, ...] = ("→ &Right:", "← &Left:", "↓ &Down:", "↑ &Up:")
@@ -179,6 +180,21 @@ class RawAccelPanel(Card):
         self.state_label = ElideLabel()
         self.state_label.setAccessibleName("Whether the settings file holds the new values")
         self.note_label = caption(WrapLabel("How exact the result is"))
+        # The acceleration of the selected profile, read-only, and the way to
+        # RawAccel's own window, where it is changed.
+        self.accel = accel.Accel(accel.RAWACCEL, problem="no settings file")
+        self.accel_label = caption(ElideLabel())
+        self.accel_label.setAccessibleName("Acceleration of the selected profile")
+        self.settings_button = QtWidgets.QPushButton("Open RawAccel")
+        self.settings_button.setToolTip(
+            "Start RawAccel's own window (rawaccel.exe in this folder), where the "
+            "acceleration is changed. QuadSens only shows it.")
+        self.settings_button.clicked.connect(self.open_rawaccel)
+        self.launch: Callable[[str, str], bool] = start_program     # replaced in tests
+        accel_row = QtWidgets.QHBoxLayout()
+        accel_row.setSpacing(SPACE_M)
+        accel_row.addWidget(self.accel_label, 1)
+        accel_row.addWidget(self.settings_button)
         self.indicator = ActiveIndicator("RawAccel driver activity", wrap=True)
         self.autostart_check = QtWidgets.QCheckBox("Re-appl&y at Windows sign-in")
         self.autostart_check.setToolTip(AUTOSTART_TIP)
@@ -232,7 +248,7 @@ class RawAccelPanel(Card):
 
         for control in (self.choose_button, self.use_button, self.reset_button,
                         self.apply_button, self.restore_button, self.flip_check,
-                        self.advanced_toggle, self.autostart_check):
+                        self.advanced_toggle, self.autostart_check, self.settings_button):
             control.setAccessibleDescription(control.toolTip())
 
         self.message = MessageLabel("RawAccel message")
@@ -244,6 +260,7 @@ class RawAccelPanel(Card):
         layout.addLayout(head)
         layout.addLayout(folder_row)
         layout.addLayout(profile_row)
+        layout.addLayout(accel_row)
         layout.addLayout(tables)
         layout.addWidget(self.state_label)
         layout.addWidget(self.note_label)
@@ -466,9 +483,45 @@ class RawAccelPanel(Card):
         self.apply_button.setEnabled(idle and usable and not self.is_applied())
         self.restore_button.setEnabled(idle and usable and self.can_restore())
         self.choose_button.setEnabled(idle)
+        self._update_accel()
         self._refresh_autostart()
         self._update_indicator(read=False)
         self.changed.emit()
+
+    # ---- acceleration, read-only --------------------------------------------------
+
+    def _update_accel(self) -> None:
+        document = self.document
+        if document is None:
+            self.accel = accel.Accel(accel.RAWACCEL, problem="no settings file")
+        else:
+            profiles = document.data.get("profiles")
+            index = self.profile_index()
+            profile = profiles[index] if isinstance(profiles, list) \
+                and index < len(profiles) and isinstance(profiles[index], dict) else {}
+            self.accel = accel.read_rawaccel_profile(profile)
+        text = self.accel.summary()
+        self.accel_label.setText(text)
+        self.accel_label.setAccessibleDescription(text)
+        self.accel_label.setToolTip(text + ". Read-only here; change it in RawAccel.")
+        self.settings_button.setEnabled(self.folder is not None)
+
+    def open_rawaccel(self) -> None:
+        """Start RawAccel's own window, or say where it should be."""
+        if self.folder is None:
+            return
+        program = self.folder / accel.RAWACCEL_GUI
+        if not program.is_file():
+            self.message.show_message(
+                "%s is not in %s. It comes with RawAccel; choose the folder that holds "
+                "it, or install RawAccel with the button on top of the window."
+                % (accel.RAWACCEL_GUI, self.folder))
+        elif self.launch(str(program), str(self.folder)):
+            self.message.show_message(
+                "Started RawAccel. After you change something there and it saves "
+                "settings.json, press Choose folder or restart QuadSens to read it again.")
+        else:
+            self.message.show_message("%s could not be started." % program, error=True)
 
     # ---- is the driver applying it? -----------------------------------------------
 

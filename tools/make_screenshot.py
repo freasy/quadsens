@@ -748,6 +748,12 @@ def main(argv: list[str]) -> int:
         for name in PARAM_NAMES:
             (params / name).write_text("1.000000\n")
         (params / "update").write_text("0\n")
+        # The acceleration the stand-in driver is set to (shown read-only).
+        for name, text in (("AccelerationMode", "1"), ("Acceleration", "0.05"),
+                           ("Exponent", "1.8"), ("Midpoint", "1.3"), ("Motivity", "1.5"),
+                           ("Offset", "0"), ("InputCap", "0"), ("OutputCap", "0"),
+                           ("UseSmoothing", "0")):
+            (params / name).write_text(text + "\n")
         uhid = Path(tmp, "uhid")  # a plain file: "writable", but never opened
         uhid.write_bytes(b"")
         cal_dir = Path(tmp, "Users", "u1", "ASFData", "mouse")

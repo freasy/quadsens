@@ -1134,6 +1134,31 @@ class ActiveAndAutostartTest(WindowCase):
         self.assertEqual(window.tools_strip.active_label.text(),
                          "✕ Not active yet: restart Windows")
 
+    def test_acceleration_of_the_profile_is_shown_read_only(self) -> None:
+        shutil.copy(FIXTURES / "rawaccel" / "settings-1.7.1-profiles.json", self.settings_file)
+        original = self.settings_file.read_bytes()
+        window = self.make()
+        window.show()
+        panel = window.rawaccel_panel
+        self.assertEqual(panel.accel_label.text(), "Acceleration: off")
+        panel.profile_combo.setCurrentIndex(1)
+        self.assertEqual(panel.accel_label.text(),
+                         "Acceleration: Classic, acceleration 0.005, exponentClassic 2; "
+                         "cap (output) input 15, output 1.5; gain")
+        panel.profile_combo.setCurrentIndex(2)
+        self.assertIn("Natural", panel.accel_label.text())
+        self.assertEqual(self.settings_file.read_bytes(), original)     # nothing written
+
+        started: list[tuple[str, str]] = []
+        panel.launch = lambda program, folder: started.append((program, folder)) or True
+        panel.settings_button.click()
+        self.assertEqual(started, [])                          # no rawaccel.exe in the folder
+        self.assertIn("rawaccel.exe is not in", panel.message.text())
+        (self.folder / "rawaccel.exe").write_bytes(b"MZ")
+        panel.settings_button.click()
+        self.assertEqual(started, [(str(self.folder / "rawaccel.exe"), str(self.folder))])
+        self.assertIn("Started RawAccel", panel.message.text())
+
     def test_autostart_is_off_until_ticked_and_gone_when_unticked(self) -> None:
         window = self.make()
         panel = window.rawaccel_panel
@@ -1180,6 +1205,9 @@ class ActiveAndAutostartTest(WindowCase):
     def test_autostart_needs_a_folder_and_reports_a_registry_that_refuses(self) -> None:
         window = self.make(choose=False)
         panel = window.rawaccel_panel
+        self.assertFalse(panel.settings_button.isEnabled())           # no folder, no RawAccel
+        self.assertEqual(panel.accel_label.text(),
+                         "Acceleration: not read (no settings file)")
         self.assertFalse(panel.autostart_check.isEnabled())
         self.assertIn("Needs the RawAccel folder", panel.boot_label.text())
         panel.choose_folder(str(self.folder))

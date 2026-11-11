@@ -391,6 +391,45 @@ class MainWindowTest(unittest.TestCase):
         self.assertEqual(again.driver_panel.indicator.text(), "✓ Active in driver")
         self.assertTrue(again.driver_panel.indicator.detail.text().startswith("Applied "))
 
+    def test_acceleration_is_shown_read_only_with_a_way_to_the_drivers_settings(self) -> None:
+        for name, text in (("AccelerationMode", "3"), ("Acceleration", "0.05"),
+                           ("Exponent", "1.8"), ("Midpoint", "1.3"), ("Motivity", "1.5"),
+                           ("Offset", "0"), ("InputCap", "0"), ("OutputCap", "2"),
+                           ("UseSmoothing", "0")):
+            (self.params / name).write_text(text + "\n")
+        before = {path.name: path.read_text() for path in self.params.iterdir()}
+        window = self.make_window()
+        window.show()
+        panel = window.driver_panel
+        self.assertEqual(panel.accel_label.text(),
+                         "Acceleration: Classic, 0.05, 1.8; output cap 2")
+        self.assertEqual(panel.accel_label.accessibleDescription(),
+                         "Acceleration: Classic, Acceleration 0.05, Exponent 1.8; "
+                         "output cap 2; UseSmoothing off")
+        # Changed in the driver's own program: the next look shows it.
+        (self.params / "AccelerationMode").write_text("12\n")
+        before["AccelerationMode"] = "12\n"
+        panel.watch()
+        self.assertEqual(panel.accel_label.text(),
+                         "Acceleration: mode 12 (not known to QuadSens)")
+
+        started: list[tuple[str, str]] = []
+        panel.launch = lambda program, folder: started.append((program, folder)) or True
+        panel.find_gui = lambda: None
+        panel.advanced_toggle.setChecked(True)
+        self.assertTrue(panel.settings_button.isVisible())
+        panel.settings_button.click()
+        self.assertEqual(started, [])
+        self.assertIn("was not found", panel.message.text())
+        self.assertIn("installed together with the fork", panel.message.text())
+        panel.find_gui = lambda: "/usr/bin/yeetmouse"
+        panel.settings_button.click()
+        self.assertEqual(started, [("/usr/bin/yeetmouse", "")])
+        self.assertIn("Started /usr/bin/yeetmouse", panel.message.text())
+        # Showing it wrote nothing.
+        self.assertEqual({path.name: path.read_text() for path in self.params.iterdir()},
+                         before)
+
     def test_long_texts_never_widen_the_window(self) -> None:
         """Paths, versions and messages from outside must wrap or elide."""
         window = self.make_window()

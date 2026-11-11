@@ -310,6 +310,15 @@ with the reason (module not loaded, not the fork), or *Cannot be verified*
 when the parameters are not readable for you. The driver check on top shows
 the same in short. Reading needs no extra rights and writes nothing.
 
+**Acceleration.** The head of the driver card shows the acceleration the
+driver is set to, for example "Acceleration: Linear, 0.05; cap none", read
+from the module parameters (or from `/etc/yeetmouse.conf` when the module
+cannot be read, which it then says). QuadSens only shows it. *Advanced > Open
+yeetmouse settings…* starts the driver's own settings program (`yeetmouse`,
+installed with the fork), where it is changed. A mode QuadSens does not know
+is shown by its number, not guessed. How the modes of yeetmouse and RawAccel
+relate is written up in [docs/accel-modes.md](docs/accel-modes.md).
+
 To calibrate again later, start at step 1; resetting the driver to 1.0 makes
 QuadSens wait for a new result.
 
@@ -568,6 +577,12 @@ values cannot be read back; the line then says *Sent to the driver HH:MM:SS,
 accepted by RawAccel's writer*, which is what is known, and *Not applied
 since Windows started* once Windows was restarted after that.
 
+**Acceleration.** Under the profile the card shows the acceleration of the
+selected profile as RawAccel's settings file names it, for example
+"Acceleration: Classic, acceleration 0.005, exponentClassic 2; ...", read-only.
+*Open RawAccel* starts `rawaccel.exe` from the chosen folder, where it is
+changed.
+
 **After a restart.** RawAccel's driver forgets its settings when Windows
 shuts down; they stay in `settings.json`. Tick *Re-apply at Windows sign-in*
 in the RawAccel card to have them loaded again each time you sign in. It is
@@ -738,6 +753,7 @@ quadsens/              application package
   win_autostart.py     the opt-in startup entry for RawAccel's writer (no Qt)
   rawaccel_live.py     read RawAccel's driver state, read-only (no Qt)
   active.py, active_linux.py   "is the driver applying it", in words (no Qt)
+  accel.py             acceleration settings of both drivers, read-only (no Qt)
   persist.py           save to the config file and verify it (no Qt)
   steps.py             the guided steps, derived from state (no Qt)
   model.py             value types and number parsing (no Qt)
