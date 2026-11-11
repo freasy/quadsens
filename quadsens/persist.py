@@ -185,7 +185,7 @@ class Saver:
         """Check the file after a save. Returns the state and a message for the user."""
         state = self.state(driver)
         if state is SaveState.SAVED:
-            return state, f"Saved to {self.config_path}. The values survive a module reload."
+            return state, f"Saved to {self.config_path}."
         if state is SaveState.MISSING_KEYS:
             return state, (
                 f"Nothing directional was saved: {self.config_path} has no dirScale "

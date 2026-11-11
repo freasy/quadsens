@@ -272,6 +272,138 @@ class DetectionTest(unittest.TestCase):
         self.assertEqual(ds.parse_dkms_status("yeetmouse-driver/../x: added\n", KERNEL), [])
 
 
+class StripTest(unittest.TestCase):
+    """The one-line driver check of the main window, for every kind of machine."""
+
+    def setUp(self) -> None:
+        self.sys = FakeSystem(self)
+        (self.sys.bin / "pkexec").write_text("")
+        self.pin = ds.pin()
+
+    def strip(self, readable: bool | None = True, **kwargs: bool) -> ds.Strip:
+        probe = self.sys.probe(**kwargs)
+        return ds.strip(ds.detect(probe, self.pin), ds.prerequisites(probe), self.pin,
+                        readable)
+
+    def complete(self) -> None:
+        self.sys.fork()
+        self.sys.userspace()
+        self.sys.group()
+        self.sys.loaded()
+
+    def test_checking(self) -> None:
+        strip = ds.strip(None)
+        self.assertEqual((strip.kind, strip.mark, strip.action), (ds.CHECKING, "…", ""))
+        self.assertEqual(strip.describe(), "Driver check: checking. Checking the driver …")
+
+    def test_passed(self) -> None:
+        self.complete()
+        strip = self.strip()
+        self.assertEqual((strip.kind, strip.mark), (ds.PASSED, "✓"))
+        self.assertEqual(strip.headline, "Driver check passed")
+        self.assertEqual(strip.detail, "fork 0.9.5+dirscale1, module loaded, values readable")
+        self.assertEqual((strip.action, strip.action_label), (ds.ACT_DETAILS, "Details"))
+        self.assertTrue(strip.describe().startswith("Driver check: passed."))
+        # Still passed when the panel has not read the driver yet.
+        self.assertEqual(self.strip(readable=None).kind, ds.PASSED)
+
+    def test_nothing_installed_is_fixable(self) -> None:
+        strip = self.strip(readable=None)
+        self.assertEqual((strip.kind, strip.mark, strip.action), (ds.FIXABLE, "✕", ds.ACT_FIX))
+        self.assertEqual(strip.headline, "No yeetmouse driver is installed.")
+        self.assertEqual(strip.action_label, "Fi&x driver setup…")
+        self.assertIn("needs attention", strip.describe())
+
+    def test_stock_from_the_upstream_installer_is_fixable(self) -> None:
+        self.sys.stock()
+        self.sys.userspace(fork_tool=False)
+        self.sys.group()
+        self.sys.loaded(fork=False)
+        strip = self.strip()
+        self.assertEqual((strip.kind, strip.action), (ds.FIXABLE, ds.ACT_FIX))
+        self.assertIn("0.9.5 is the unmodified one", strip.headline)
+        self.assertIn("without the directional parameters", strip.headline)
+
+    def test_packaged_stock_is_explained_without_a_button(self) -> None:
+        self.sys.stock()
+        self.sys.packaged("usr/src/yeetmouse-driver-0.9.5")
+        strip = self.strip()
+        self.assertEqual((strip.kind, strip.mark, strip.action), (ds.ATTENTION, "⚠", ""))
+        self.assertIn("belongs to a package", strip.headline)
+        self.assertIn('"yeetmouse-driver-dkms"', strip.detail)
+
+    def test_other_fork_version_is_fixable(self) -> None:
+        self.sys.fork("0.9.6+dirscale2")
+        strip = self.strip()
+        self.assertEqual(strip.kind, ds.FIXABLE)
+        self.assertIn("installed as 0.9.6+dirscale2; QuadSens expects 0.9.5+dirscale1",
+                      strip.headline)
+
+    def test_missing_tool_service_or_group_is_fixable(self) -> None:
+        self.sys.fork()
+        self.sys.loaded()
+        self.assertIn("yeetmousectl is missing", self.strip().headline)
+        self.sys.userspace(fork_tool=False)
+        self.assertIn("the unmodified one", self.strip().headline)
+        self.sys.userspace()
+        (self.sys.root / "usr/lib/systemd/system/yeetmouse.service").unlink()
+        self.assertIn("yeetmouse.service is missing", self.strip().headline)
+        self.sys.userspace()
+        strip = self.strip()                      # no group yet
+        self.assertEqual((strip.kind, strip.action), (ds.FIXABLE, ds.ACT_FIX))
+        self.assertIn("not in group yeetmouse", strip.headline)
+        self.sys.group("someone-else")
+        self.assertIn("not in group yeetmouse", self.strip().headline)
+
+    def test_missing_prerequisites_lead_to_the_checklist(self) -> None:
+        (self.sys.bin / "git").unlink()
+        (self.sys.bin / "make").unlink()
+        strip = self.strip()
+        self.assertEqual((strip.kind, strip.action), (ds.ATTENTION, ds.ACT_CHECKLIST))
+        self.assertEqual(strip.headline, "No yeetmouse driver is installed.")
+        self.assertIn("it needs: git, make.", strip.detail)
+        self.assertIn("sudo pacman -S git", strip.detail)
+        self.assertEqual(strip.action_label, "Show what is missing…")
+        # With the fork in place, missing build tools do not matter.
+        self.complete()
+        self.assertEqual(self.strip().kind, ds.PASSED)
+
+    def test_installed_but_not_loaded(self) -> None:
+        self.sys.fork()
+        self.sys.userspace()
+        self.sys.group()
+        strip = self.strip(readable=None)
+        self.assertEqual((strip.kind, strip.action), (ds.ATTENTION, ""))
+        self.assertIn("not loaded", strip.headline)
+        self.assertIn("sudo modprobe yeetmouse", strip.detail)
+        self.sys.loaded(fork=False)               # the old module is still in memory
+        self.assertIn("older module is still loaded", self.strip().headline)
+
+    def test_member_of_the_group_but_session_not_yet(self) -> None:
+        # The hand-installed machine right after the install: member, no re-login yet.
+        self.complete()
+        self.sys.source("0.9.5", "usr/local/src")
+        strip = self.strip(readable=False, in_session=False)
+        self.assertEqual((strip.kind, strip.action), (ds.ATTENTION, ""))
+        self.assertTrue(strip.headline.startswith("Log out and in again"))
+        self.assertIn("Apply asks for authorization", strip.detail)
+        # If the values can be read anyway, there is nothing to complain about.
+        self.assertEqual(self.strip(readable=True, in_session=False).kind, ds.PASSED)
+
+    def test_values_not_readable_although_the_session_is_in_the_group(self) -> None:
+        self.complete()
+        strip = self.strip(readable=False)
+        self.assertEqual(strip.kind, ds.ATTENTION)
+        self.assertIn("not readable", strip.headline)
+        self.assertIn("systemctl restart yeetmouse.service", strip.detail)
+
+    def test_every_state_has_a_mark_and_words(self) -> None:
+        for kind in (ds.PASSED, ds.FIXABLE, ds.ATTENTION, ds.CHECKING):
+            self.assertTrue(ds.STRIP_MARKS[kind])
+            self.assertTrue(ds.STRIP_WORDS[kind])
+        self.assertEqual(len(set(ds.STRIP_MARKS.values())), 4)
+
+
 class PrerequisiteTest(unittest.TestCase):
     def setUp(self) -> None:
         self.sys = FakeSystem(self)

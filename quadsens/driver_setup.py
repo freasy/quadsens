@@ -322,6 +322,109 @@ def detect(probe: Probe | None = None, pinned: Pin | None = None) -> SetupState:
         backup_version=backup_version, recorded=recorded)
 
 
+# ---- the driver check on the main window ---------------------------------------------
+
+PASSED, FIXABLE, ATTENTION, CHECKING = "passed", "fixable", "attention", "checking"
+ACT_NONE, ACT_DETAILS, ACT_FIX, ACT_CHECKLIST = "", "details", "fix", "checklist"
+ACTION_LABELS = {ACT_FIX: "Fi&x driver setup…", ACT_CHECKLIST: "Show what is missing…",
+                 ACT_DETAILS: "Details"}
+STRIP_MARKS = {PASSED: "✓", FIXABLE: "✕", ATTENTION: "⚠", CHECKING: "…"}
+STRIP_WORDS = {PASSED: "passed", FIXABLE: "needs attention", ATTENTION: "needs attention",
+               CHECKING: "checking"}
+
+
+@dataclass(frozen=True)
+class Strip:
+    """What the driver check on the main window says."""
+
+    kind: str            # PASSED, FIXABLE (the installer can fix it), ATTENTION, CHECKING
+    headline: str
+    detail: str = ""
+    action: str = ACT_NONE   # what its button does: ACT_FIX, ACT_CHECKLIST, ACT_DETAILS
+
+    @property
+    def mark(self) -> str:
+        return STRIP_MARKS[self.kind]
+
+    @property
+    def action_label(self) -> str:
+        return ACTION_LABELS.get(self.action, "")
+
+    def describe(self) -> str:
+        """For screen readers: the state in words, then the texts."""
+        text = f"Driver check: {STRIP_WORDS[self.kind]}. {self.headline}"
+        return f"{text} {self.detail}" if self.detail else text
+
+
+CHECKING_STRIP = Strip(CHECKING, "Checking the driver …")
+
+
+def strip(state: SetupState | None, checks: Sequence["Check"] = (),
+          pinned: Pin | None = None, readable: bool | None = None) -> Strip:
+    """Reduce the detection result to one headline, one detail and at most one action.
+
+    ``readable`` is what the driver panel found: True if the driver values could
+    be read, False if not, None if that is not known.
+    """
+    if state is None:
+        return CHECKING_STRIP
+    expected = pinned.version if pinned is not None else ""
+
+    if state.kind is Kind.STOCK_PACKAGED:
+        return Strip(ATTENTION, "The installed yeetmouse driver belongs to a package.",
+                     f"Remove the package \"{state.package}\" with your package manager; "
+                     "after that the driver setup can install the fork.")
+
+    problem = ""
+    if state.kind is Kind.NONE:
+        problem = "No yeetmouse driver is installed."
+    elif state.kind is Kind.STOCK:
+        problem = (f"The installed yeetmouse driver {state.stock_version} is the unmodified "
+                   "one, without the directional parameters.")
+    elif state.kind is Kind.FORK_OTHER:
+        problem = (f"The yeetmouse fork is installed as {state.fork_version}; QuadSens "
+                   f"expects {expected}.")
+    elif not state.tool:
+        problem = "The driver is installed, but its tool yeetmousectl is missing."
+    elif not state.tool_is_fork:
+        problem = ("The driver is installed, but yeetmousectl is the unmodified one and "
+                   "cannot save the directional values.")
+    elif not state.service:
+        problem = "The driver is installed, but yeetmouse.service is missing."
+    elif not state.group_exists or not state.in_group:
+        problem = f"You are not in group {GROUP}, which may read and write the driver values."
+    if problem:
+        missing = [check for check in checks if check.required and not check.ok]
+        if missing:
+            names = ", ".join(check.name for check in missing)
+            hint = missing[0].hint
+            return Strip(ATTENTION, problem,
+                         f"The driver setup can fix this, but it needs: {names}. {hint}".strip(),
+                         ACT_CHECKLIST)
+        return Strip(FIXABLE, problem,
+                     "The driver setup can fix this. It shows what it will do first.", ACT_FIX)
+
+    if not state.loaded:
+        return Strip(ATTENTION, "The driver is installed but not loaded.",
+                     "Load it with: sudo modprobe yeetmouse. Then press Check again.")
+    if not state.loaded_is_fork:
+        return Strip(ATTENTION, "The fork is installed, but an older module is still loaded.",
+                     "Reload it: sudo modprobe -r yeetmouse && sudo modprobe yeetmouse, or "
+                     "reboot. Then press Check again.")
+    if readable is not True and not state.group_active:
+        return Strip(ATTENTION, f"Log out and in again: you are in group {GROUP}, but this "
+                                "session started before that.",
+                     "Until then the driver values cannot be read here, and Apply asks for "
+                     "authorization.")
+    if readable is False:
+        return Strip(ATTENTION, "The driver values are not readable.",
+                     "The module was probably reloaded: sudo systemctl restart "
+                     "yeetmouse.service. Then press Check again.")
+    return Strip(PASSED, "Driver check passed",
+                 f"fork {state.fork_version}, module loaded"
+                 + (", values readable" if readable else ""), ACT_DETAILS)
+
+
 # ---- prerequisites -----------------------------------------------------------------
 
 # Package names per family of distributions, for the hints.
