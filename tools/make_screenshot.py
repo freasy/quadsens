@@ -3,6 +3,7 @@
 
 Usage: python3 tools/make_screenshot.py [--dark] [OUTPUT.png] [WIDTHxHEIGHT]
        python3 tools/make_screenshot.py --sheet OUTPUT.png
+       python3 tools/make_screenshot.py [--dark] --diagrams DIRECTORY
 
 Uses a temp directory in place of sysfs and of the config file, a copy of the
 fixture calibration file and a stand-in for yeetmousectl. It does not create
@@ -14,6 +15,9 @@ directory. --dark renders with a dark palette instead of the default one.
 --sheet renders a contact sheet for checking the look by eye: the controls in
 their normal, hover, pressed, focused and disabled states, the banner kinds
 and the stepper, once with the light and once with the dark palette.
+
+--diagrams renders the direction diagram alone for three sets of multipliers
+(a real result, all 1.0, strongly lopsided) into DIRECTORY.
 
 The calibration data is made up but consistent: the four multipliers are the
 1-2-1 weighted averages of the eight measured values, a few percent around 1.
@@ -39,6 +43,7 @@ from quadsens.model import Scalars  # noqa: E402
 from quadsens.persist import SaveState, Saver  # noqa: E402
 from quadsens.steps import FlowState, Step, derive  # noqa: E402
 from quadsens.ui.main_window import MainWindow  # noqa: E402
+from quadsens.ui.compass import DirectionDiagram  # noqa: E402
 from quadsens.ui.qt import BINDING, QtCore, QtGui, QtWidgets  # noqa: E402
 from quadsens.ui.scale_spin import ScaleSpinBox  # noqa: E402
 from quadsens.ui.status import Card, Disclosure, MessageLabel  # noqa: E402
@@ -240,7 +245,49 @@ def contact_sheet(output: Path) -> None:
     print("contact sheet %s (%dx%d)" % (output, sheet.width(), sheet.height()))
 
 
+# Right, left, down, up.
+DIAGRAM_CASES = {
+    "real": Scalars(0.9855, 1.0012, 0.9953, 1.0016),
+    "ones": Scalars.unity(),
+    "lopsided": Scalars(1.08, 0.93, 1.05, 0.97),
+}
+
+
+def diagram_renders(directory: Path, size: tuple[int, int] = (360, 300)) -> None:
+    """The diagram on a card, once per case, as diagram-<case>.png."""
+    app = QtWidgets.QApplication.instance()
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, scalars in DIAGRAM_CASES.items():
+        card = Card("sample")
+        layout = QtWidgets.QVBoxLayout(card)
+        layout.setContentsMargins(12, 8, 12, 8)
+        widget = DirectionDiagram()
+        widget.set_scalars(scalars)
+        layout.addWidget(widget)
+        card.resize(*size)
+        card.show()
+        for _ in range(4):
+            app.processEvents()
+        target = directory / f"diagram-{name}.png"
+        card.grab().save(str(target))
+        card.close()
+        card.deleteLater()
+        print("diagram %s: %s" % (name, target))
+
+
 def main(argv: list[str]) -> int:
+    if "--diagrams" in argv:
+        dark = "--dark" in argv
+        rest = [arg for arg in argv if arg not in ("--diagrams", "--dark")]
+        if len(rest) < 2:
+            print("usage: make_screenshot.py [--dark] --diagrams DIRECTORY", file=sys.stderr)
+            return 2
+        app = QtWidgets.QApplication([rest[0]])
+        if dark:
+            app.setPalette(dark_palette())
+        ThemeManager.instance().apply()
+        diagram_renders(Path(rest[1]))
+        return 0
     if "--sheet" in argv:
         argv = [arg for arg in argv if arg != "--sheet"]
         if len(argv) < 2:

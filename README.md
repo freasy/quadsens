@@ -207,9 +207,12 @@ work in any order.
    per-direction sensitivity calibration with your real mouse. QuadSens
    notices the result on its own, either as a result file newer than the
    mouse start or as values sent to the virtual mouse. The diagram under
-   *Calibration result* then shows the four multipliers with their deviation
-   from 1.0; *Measured values* shows the raw numbers, including the eight
-   measured directions.
+   *Calibration result* then shows what the driver will apply: a dashed ring
+   for 1.0 and a curve through four arrows, one per direction. An arrow that
+   ends outside the ring makes its direction faster, one that ends inside
+   makes it slower; each is labelled with its value and percent. Deviations
+   are drawn 20 times enlarged, as the caption says. *Measured values* shows
+   the raw numbers, including the eight measured directions.
 4. **Use result.** Press *Use result*. The four new values are filled in and
    the changed rows are marked as unsaved.
 5. **Apply.** Press *Apply*. The *Driver reports* column shows what the module

@@ -913,10 +913,21 @@ class MainWindowTest(unittest.TestCase):
         window = self.make_window()
         cal = window.calibration_panel
         description = cal.diagram.accessibleDescription()
-        for expected in ("Right 1.0375 (+3.8 %)", "Left 0.9625 (-3.8 %)",
-                         "Down 1.1250 (+12.5 %)", "Up 0.8750 (-12.5 %)",
+        for expected in ("Right 1.0375, 3.8 % faster than 1.0",
+                         "Left 0.9625, 3.8 % slower than 1.0",
+                         "Down 1.1250, 12.5 % faster than 1.0",
+                         "Up 0.8750, 12.5 % slower than 1.0",
                          "measured: E 1.0400", "SE 0.9500"):
             self.assertIn(expected, description)
+        shape = cal.diagram.shape()
+        assert shape is not None
+        self.assertEqual([arrow.name for arrow in shape.arrows],
+                         ["Right", "Left", "Down", "Up"])
+        self.assertIn("drawn ×20", shape.caption)
+        self.assertIn("faster", cal.diagram.toolTip())
+        self.assertIn("Outside the dashed ring", cal.diagram.toolTip())
+        self.assertEqual((cal.diagram.minimumSize().width(),
+                          cal.diagram.minimumSize().height()), (230, 150))
         self.assertTrue(cal.details.isHidden())  # the raw numbers are secondary
         cal.details_toggle.click()
         self.assertFalse(cal.details.isHidden())
