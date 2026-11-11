@@ -18,7 +18,15 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 
-from .. import about, usbip_client, win_download, win_install, win_tools
+from .. import (
+    about,
+    rawaccel_live,
+    usbip_client,
+    win_autostart,
+    win_download,
+    win_install,
+    win_tools,
+)
 from ..calibration import NO_RESULT_FOLDER, result_folder
 from ..steps import (
     FIX_FOLDER,
@@ -46,7 +54,7 @@ from .usbip_panel import UsbipMousePanel
 from .values_io import ValuesIO
 from .window_common import WindowCommon, about_html
 
-DEFAULT_SIZE = (900, 720)
+DEFAULT_SIZE = (900, 780)
 # Below the size at which everything fits, the page scrolls instead of being cut.
 MINIMUM_SIZE = (760, 520)
 NO_RESULT_WINDOWS = (
@@ -82,7 +90,10 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
                  install_tools: win_install.Tools | None = None,
                  driver_state: Callable[[float | None], str] | None = None,
                  latest_release: Callable[[win_tools.Pin], win_download.Latest | None]
-                 | None = win_download.latest_release) -> None:
+                 | None = win_download.latest_release,
+                 read_live: Callable[[], rawaccel_live.Live] = rawaccel_live.read_driver,
+                 registry: win_autostart.Registry | None = None,
+                 started: Callable[[], float | None] = win_install.boot_time) -> None:
         super().__init__(parent)
         self._settings = settings
         self._calibration_glob = calibration_glob
@@ -122,7 +133,10 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
         self.mouse_panel = UsbipMousePanel(mouse_factory or make_mouse, settings)
         self.calibration_panel = CalibrationPanel(calibration_glob, settings,
                                                   no_result_text=NO_RESULT_WINDOWS)
-        self.rawaccel_panel = RawAccelPanel(settings, self.calibration_panel.result, environ)
+        self.rawaccel_panel = RawAccelPanel(
+            settings, self.calibration_panel.result, environ, read_live=read_live,
+            driver_state=lambda: self._driver_state(self._installed_at()),
+            started=started, registry=registry)
         self.tools_strip = ToolsStrip(self._find_client, self.rawaccel_info)
         self.usbip_strip = self.tools_strip          # its first line is the USB/IP driver
         self.calibration_panel.set_flip_y(self.rawaccel_panel.flip())
@@ -160,6 +174,7 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
         self.tools_strip.checked.connect(self.update_steps)
         self.tools_strip.recheck_button.clicked.connect(self.check_online)
         self.rawaccel_panel.changed.connect(self._rawaccel_changed)
+        self._rawaccel_changed()
         self._online_timer = QtCore.QTimer(self)
         self._online_timer.setInterval(200)
         self._online_timer.timeout.connect(self._take_online_results)
@@ -177,7 +192,8 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
             self.calibration_panel.refresh_button,
             panel.advanced_toggle, panel.folder_edit, panel.choose_button,
             panel.profile_combo, *panel.spins, panel.use_button, panel.reset_button,
-            panel.apply_button, panel.restore_button, panel.flip_check,
+            panel.apply_button, panel.restore_button, panel.autostart_check,
+            panel.flip_check,
         ]
         for first, second in zip(order, order[1:]):
             QtWidgets.QWidget.setTabOrder(first, second)
@@ -265,22 +281,26 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
 
     # ---- the tools: what is there, installing, newer versions ---------------------
 
+    def _installed_at(self) -> float | None:
+        stored = self._settings.value("tools/rawaccel_installed_at")
+        try:
+            return float(stored) if stored is not None else None
+        except (TypeError, ValueError):
+            return None
+
     def rawaccel_info(self) -> RawAccelInfo:
         panel = self.rawaccel_panel
         folder = str(panel.folder) if panel.folder is not None else ""
-        stored = self._settings.value("tools/rawaccel_installed_at")
-        try:
-            installed_at = float(stored) if stored is not None else None
-        except (TypeError, ValueError):
-            installed_at = None
         return RawAccelInfo(folder, win_install.rawaccel_version(folder) if folder else "",
-                            self._driver_state(installed_at))
+                            self._driver_state(self._installed_at()))
 
     def _rawaccel_changed(self) -> None:
         panel = self.rawaccel_panel
         folder = str(panel.folder) if panel.folder is not None else ""
         if folder != self.tools_strip.rawaccel.folder:
             self.tools_strip.refresh_rawaccel()
+        shown = panel.active
+        self.tools_strip.set_active(shown.short(), shown.detail)
 
     def install_tool(self, key: str) -> None:
         """Open the install dialog for a tool. Nothing happens before its button."""

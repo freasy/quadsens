@@ -320,6 +320,77 @@ class MainWindowTest(unittest.TestCase):
                 self.assertTrue(name, f"{widget!r} has no accessible name or text")
                 self.assertNotEqual(widget.focusPolicy(), QtCore.Qt.FocusPolicy.NoFocus)
 
+    def test_indicator_says_whether_the_driver_applies_the_values(self) -> None:
+        window = self.make_window()
+        window.show()
+        panel, strip = window.driver_panel, window.driver_strip
+        indicator = panel.indicator
+        self.assertEqual(indicator.text(), "○ Neutral: all four driver values are 1.0")
+        self.assertEqual(indicator.property("banner"), "info")
+        self.assertEqual(strip.active_label.text(), indicator.text())      # mirrored on top
+        # It sits right under the buttons, where the eye is after Apply.
+        _app.processEvents()
+        self.assertGreater(indicator.y(), panel.apply_button.y())
+        self.assertLess(indicator.y() - panel.apply_button.geometry().bottom(), 16)
+
+        before = time.time()
+        panel.use_button.click()
+        panel.apply_button.click()
+        self.wait_idle(window)
+        self.assertEqual(indicator.text(), "✓ Active in driver")
+        self.assertEqual(indicator.property("banner"), "success")
+        detail = indicator.detail.text()
+        self.assertRegex(detail, r"^Applied \d\d:\d\d:\d\d: Right 1\.0375, Left 0\.9625, "
+                                 r"Down \d\.\d{4}, Up \d\.\d{4}$")
+        self.assertIn("Active in driver", indicator.accessibleName())
+        self.assertIn("Right 1.0375", indicator.accessibleName())
+        self.assertEqual(strip.active_label.text(), "✓ Active in driver")
+        self.assertGreaterEqual(float(window._settings.value("driver/applied_at")), before)
+
+        # Somebody else changes a value: the next look notices, without a click.
+        (self.params / "DirScaleXPos").write_text("1.100000\n")
+        panel.watch()
+        self.assertEqual(indicator.text(), "≠ Active, but different from QuadSens")
+        self.assertEqual(indicator.property("banner"), "warning")
+        self.assertIn("Driver: Right 1.1000", indicator.detail.text())
+        self.assertIn("QuadSens last wrote Right 1.0375", indicator.detail.text())
+        self.assertEqual(panel.current_labels[0].text(), "1.100000")
+        self.assertEqual(strip.active_label.text(), indicator.text())
+
+        # Nothing changed: the look costs no redraw and no signal.
+        seen: list[int] = []
+        panel.changed.connect(lambda: seen.append(1))
+        panel.watch()
+        self.assertEqual(seen, [])
+
+        # The module goes away.
+        shutil.rmtree(self.params.parent)
+        panel.watch()
+        self.assertEqual(indicator.text(), "✕ Not active: the yeetmouse module is not loaded")
+        self.assertTrue(indicator.detail.isHidden())      # the banner above says what to do
+        self.assertEqual(strip.active_label.text(), indicator.text())
+
+    def test_the_driver_is_watched_only_while_the_window_is_visible(self) -> None:
+        window = self.make_window()
+        panel = window.driver_panel
+        self.assertFalse(panel._watch.isActive())
+        window.show()
+        _app.processEvents()
+        self.assertTrue(panel._watch.isActive())
+        self.assertGreaterEqual(panel._watch.interval(), 2000)
+        window.hide()
+        _app.processEvents()
+        self.assertFalse(panel._watch.isActive())
+        # A new start remembers what was applied, and when.
+        window.show()
+        panel.use_button.click()
+        panel.apply_button.click()
+        self.wait_idle(window)
+        window.close()
+        again = self.make_window()
+        self.assertEqual(again.driver_panel.indicator.text(), "✓ Active in driver")
+        self.assertTrue(again.driver_panel.indicator.detail.text().startswith("Applied "))
+
     def test_long_texts_never_widen_the_window(self) -> None:
         """Paths, versions and messages from outside must wrap or elide."""
         window = self.make_window()

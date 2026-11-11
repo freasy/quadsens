@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 
+from .. import active_linux
 from ..calibration import Result, driver_scalars
 from ..driver import (
     PARAM_NAMES,
@@ -21,7 +23,9 @@ from .scale_spin import ScaleSpinBox
 from .status import (
     SPACE_M,
     SPACE_S,
+    ActiveIndicator,
     Card,
+    ElideLabel,
     Disclosure,
     MessageLabel,
     WrapLabel,
@@ -34,6 +38,7 @@ from .status import (
 DIRECTIONS: tuple[str, ...] = ("right", "left", "down", "up")
 ROW_TITLES: tuple[str, ...] = ("→ &Right:", "← &Left:", "↓ &Down:", "↑ &Up:")
 NO_VALUE = "–"
+WATCH_MS = 3000          # how often the driver is read again while the card is visible
 DECIMALS = 4
 # Half a step of the last digit shown: closer than this is "the same value".
 SAME_VALUE = 0.5 * 10 ** -DECIMALS + 1e-9
@@ -122,23 +127,26 @@ class DriverPanel(Card):
         # Two lines of state. A driver problem takes the place of both, so that
         # a hint never changes the height of the panel.
         self.status_label = MessageLabel("Driver status")
-        self.pending_label = QtWidgets.QLabel()
+        self.pending_label = ElideLabel()
         self.pending_label.setAccessibleName("Unsaved changes")
         self.pending_label.setToolTip(
             "Whether the new values differ from what the driver reports.")
-        self.saved_label = QtWidgets.QLabel()
+        self.saved_label = ElideLabel()
         self.saved_label.setAccessibleName("Saved to config state")
         self.saved_label.setToolTip(PERSIST)
+        # One line of state while everything works (the two labels side by
+        # side); a driver problem takes its place with what to do about it.
         state_box = QtWidgets.QWidget()
         state_layout = QtWidgets.QVBoxLayout(state_box)
         state_layout.setContentsMargins(0, 0, 0, 0)
         state_layout.setSpacing(2)
         state_layout.addWidget(self.status_label)
-        state_layout.addWidget(self.pending_label)
-        state_layout.addWidget(self.saved_label)
+        state_line = QtWidgets.QHBoxLayout()
+        state_line.setSpacing(SPACE_M)
+        state_line.addWidget(self.pending_label, 2)
+        state_line.addWidget(self.saved_label, 3)
+        state_layout.addLayout(state_line)
         state_layout.addStretch(1)
-        # Room for two lines of text, plain or inside the banner.
-        state_box.setMinimumHeight(2 * self.pending_label.fontMetrics().height() + 8)
 
         self.use_button = QtWidgets.QPushButton("Use resul&t")
         self.use_button.setToolTip("Fill the new values from the calibration result")
@@ -201,6 +209,19 @@ class DriverPanel(Card):
             control.setAccessibleDescription(control.toolTip())
 
         self.message = MessageLabel("Driver message")
+        # Right under Apply: whether the driver is applying the values, from a
+        # fresh read of the module parameters.
+        self.indicator = ActiveIndicator("Driver activity")
+        self.active = active_linux.linux_indicator(DriverState(DriverStatus.NOT_LOADED))
+        self._applied_at: float | None = None
+        stored_at = settings.value("driver/applied_at")
+        try:
+            self._applied_at = float(stored_at) if stored_at is not None else None
+        except (TypeError, ValueError):
+            self._applied_at = None
+        self._watch = QtCore.QTimer(self)
+        self._watch.setInterval(WATCH_MS)
+        self._watch.timeout.connect(self.watch)
 
         layout = self.card_layout()
         head = QtWidgets.QHBoxLayout()
@@ -210,6 +231,7 @@ class DriverPanel(Card):
         layout.addLayout(grid)
         layout.addWidget(state_box)
         layout.addLayout(buttons)
+        layout.addWidget(self.indicator)
         layout.addWidget(self.message)
         layout.addWidget(self.advanced)
         layout.addStretch(1)
@@ -317,9 +339,39 @@ class DriverPanel(Card):
             kind="info" if state.status is DriverStatus.OK else "warning")
         self.save_state = self._saver.state(self.driver_values())
         self._update_pending()
+        self._update_indicator()
         self.changed.emit()
         self.driver_read.emit()
         return state
+
+    def _update_indicator(self) -> None:
+        self.active = shown = active_linux.linux_indicator(
+            self.state, self.saved_scalars(), self._applied_at)
+        self.indicator.show_state(shown.mark, shown.headline, shown.detail, shown.tint,
+                                  shown.kind)
+        # With a driver problem the banner above says what to do; the indicator
+        # then keeps to its headline, so that the card does not grow.
+        self.indicator.detail.setVisible(self.state.status is DriverStatus.OK)
+
+    def watch(self) -> None:
+        """Look at the driver again, cheaply; redraw only when something changed.
+
+        Runs every few seconds while the card is visible, so that a module
+        that was unloaded, or values changed by another program, show up
+        without pressing anything.
+        """
+        if self._process is not None or not self.isVisible():
+            return
+        if self._driver.read() != self.state:
+            self.refresh()
+
+    def showEvent(self, event: object) -> None:  # noqa: N802 (Qt name)
+        super().showEvent(event)        # type: ignore[arg-type]
+        self._watch.start()
+
+    def hideEvent(self, event: object) -> None:  # noqa: N802 (Qt name)
+        self._watch.stop()
+        super().hideEvent(event)        # type: ignore[arg-type]
 
     def _values_edited(self, *_args: object) -> None:
         self._update_pending()
@@ -345,9 +397,14 @@ class DriverPanel(Card):
             self.pending_label.setText(
                 "%s Unsaved changes: %s" % (CHANGED_MARK, ", ".join(changed)))
         else:
-            self.pending_label.setText("Driver values read. No unsaved changes.")
+            self.pending_label.setText("No unsaved changes.")
         tool_found = self.tool_found()
         self.saved_label.setText(save_state_text(self.save_state, tool_found))
+        # The line may be cut when the card is narrow; the tooltips have it whole.
+        self.pending_label.setToolTip(
+            self.pending_label.text() + " Whether the new values differ from what the "
+            "driver reports.")
+        self.saved_label.setToolTip(self.saved_label.text() + " " + PERSIST)
 
         # While everything works the two state lines are shown; a driver problem
         # replaces them with what to do about it.
@@ -453,6 +510,8 @@ class DriverPanel(Card):
     def _applied(self, scalars: Scalars, how: str) -> None:
         self._settings.setValue("driver/saved_values",
                                 [f"{value:.6f}" for value in scalars.as_tuple()])
+        self._applied_at = time.time()
+        self._settings.setValue("driver/applied_at", self._applied_at)
         self._assumed = scalars
         state = self.refresh()
         if state.scalars is None:

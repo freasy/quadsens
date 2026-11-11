@@ -48,6 +48,9 @@ docs/screenshot-windows.png. --windows-missing renders the same window when
 usbip-win2 is not installed and the values come from an imported file.
 Rendered on Linux; both show the layout, not Windows itself.
 
+--indicators DIRECTORY renders every state of the "is the driver applying
+it" indicator for both platforms (indicator-linux.png, indicator-windows.png).
+
 The calibration data is made up but consistent: the four multipliers are the
 1-2-1 weighted averages of the eight measured values, a few percent around 1.
 """
@@ -489,7 +492,7 @@ class _DemoUsbip:
         self.client.reply()
 
 
-def windows_render(output: Path, mode: str, size: tuple[int, int] = (900, 720),
+def windows_render(output: Path, mode: str, size: tuple[int, int] = (900, 780),
                    missing: bool = False) -> None:
     """The Windows composition with fixture data.
 
@@ -497,7 +500,8 @@ def windows_render(output: Path, mode: str, size: tuple[int, int] = (900, 720),
     captured from it and taken as multipliers, before Apply. With ``missing``:
     usbip-win2 is not installed and the values come from an imported file.
     """
-    from quadsens import values_file, win_install
+    from quadsens import rawaccel_live, values_file, win_install
+    from quadsens.rawaccel import Four
     from quadsens.ui.tools_strip import RawAccelInfo
     from quadsens.ui.windows_window import WindowsMainWindow
     from quadsens.usbip_client import UsbipClient
@@ -536,7 +540,12 @@ def windows_render(output: Path, mode: str, size: tuple[int, int] = (900, 720),
             # Nothing of the render asks the network or looks at this machine.
             driver_state=lambda installed_at: (
                 win_install.DRIVER_MISSING if missing else win_install.DRIVER_READY),
-            latest_release=None)
+            latest_release=None,
+            # The driver answers with the profile's own values, as before an Apply.
+            read_live=lambda: rawaccel_live.Live(
+                rawaccel_live.UNAVAILABLE if missing else rawaccel_live.OK, (1, 7, 0),
+                () if missing else (("default", Four(1000.0, 1.0, 1.0, 1.0)),)),
+            started=lambda: None)
         window.resize(*size)
         window.show()
         window.rawaccel_panel.set_folder("C:\\Tools\\RawAccel", remember=False)
@@ -576,6 +585,62 @@ def windows_render(output: Path, mode: str, size: tuple[int, int] = (900, 720),
             pump(0.2)
             window.grab().save(str(output.with_name(output.stem + "-minimum.png")))
         window.close()
+
+
+def indicator_renders(directory: Path) -> None:
+    """Every state of the "is the driver applying it" indicator, per platform."""
+    from quadsens import active, rawaccel_live
+    from quadsens.active_linux import linux_indicator
+    from quadsens.driver import DriverState, DriverStatus
+    from quadsens.rawaccel import Four
+    from quadsens.ui.status import ActiveIndicator
+    app = QtWidgets.QApplication.instance()
+    when = time.mktime((2026, 11, 11, 14, 3, 22, 0, 0, -1))
+    values = Scalars(0.9855, 1.0012, 0.9953, 1.0016)
+    linux = [
+        linux_indicator(DriverState(DriverStatus.OK, values), values, when),
+        linux_indicator(DriverState(DriverStatus.OK, Scalars(1.1, 1.0, 1.0, 1.0)), values, when),
+        linux_indicator(DriverState(DriverStatus.OK, Scalars.unity()), values, when),
+        linux_indicator(DriverState(DriverStatus.NOT_LOADED), values, when),
+        linux_indicator(DriverState(DriverStatus.UNSUPPORTED)),
+        linux_indicator(DriverState(DriverStatus.NOT_READABLE), values, when),
+    ]
+    sent, own = Four(1011.0, 0.995054, 0.980218, 0.99006), Four(1000.0, 1.0, 1.0, 1.0)
+
+    def ok(four: Four) -> rawaccel_live.Live:
+        return rawaccel_live.Live(rawaccel_live.OK, (1, 7, 0), (("default", four),))
+    other = rawaccel_live.Live(rawaccel_live.OTHER_VERSION, (1, 6, 1))
+    windows = [
+        active.windows_indicator("ready", ok(sent), "default", sent, when, own),
+        active.windows_indicator("ready", ok(Four(1200.0, 1.0, 1.0, 1.0)), "default", sent,
+                                 when, own),
+        active.windows_indicator("ready", ok(own), "default", sent, when, own),
+        active.windows_indicator("ready", rawaccel_live.Live(rawaccel_live.EMPTY), "default",
+                                 sent, when, own),
+        active.windows_indicator("ready", other, "default", sent, when, own, when - 600),
+        active.windows_indicator("ready", other, "default", sent, when, own, when + 600),
+        active.windows_indicator("ready", rawaccel_live.Live(rawaccel_live.NOT_LOADED),
+                                 "default"),
+        active.windows_indicator(active.DRIVER_PENDING, other, "default"),
+        active.windows_indicator(active.DRIVER_MISSING, other, "default"),
+    ]
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, states in (("linux", linux), ("windows", windows)):
+        card = Card("indicator states")
+        layout = card.card_layout() if hasattr(card, "card_layout") else \
+            QtWidgets.QVBoxLayout(card)
+        for shown in states:
+            indicator = ActiveIndicator("state")
+            indicator.show_state(shown.mark, shown.headline, shown.detail, shown.tint,
+                                 shown.kind)
+            layout.addWidget(indicator)
+        card.resize(560, card.sizeHint().height())
+        card.show()
+        for _ in range(4):
+            app.processEvents()
+        card.grab().save(str(directory / ("indicator-%s.png" % name)))
+        print("indicator states: %s" % (directory / ("indicator-%s.png" % name)))
+        card.close()
 
 
 def setup_render(output: Path) -> None:
@@ -622,7 +687,7 @@ def main(argv: list[str]) -> int:
     argv, mode, dark = _options(argv)
     for flag, render in (("--diagrams", None), ("--gallery", None), ("--setup", None),
                          ("--checks", None), ("--windows", None),
-                         ("--windows-missing", None)):
+                         ("--windows-missing", None), ("--indicators", None)):
         if flag in argv:
             rest = [arg for arg in argv if arg != flag]
             if flag == "--setup" and len(rest) < 2:
@@ -647,6 +712,8 @@ def main(argv: list[str]) -> int:
                 setup_render(Path(rest[1]))
             elif flag == "--windows":
                 windows_render(Path(rest[1]), mode)
+            elif flag == "--indicators":
+                indicator_renders(Path(rest[1]))
             elif flag == "--windows-missing":
                 windows_render(Path(rest[1]), mode, missing=True)
             elif flag == "--checks":

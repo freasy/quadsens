@@ -100,6 +100,9 @@ class DriverCheckStrip(QtWidgets.QFrame):
         self.side_detail = caption(ElideLabel())
         self.side_detail.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
                                        QtWidgets.QSizePolicy.Policy.Preferred)
+        # Mirror of the indicator in the driver card: is the driver applying values?
+        self.active_label = ElideLabel()
+        self.active_label.setAccessibleName("Whether the driver is applying values")
         self.passed_headline = ElideLabel()
         self.passed_headline.setFont(font)
         self.detail = caption(WrapLabel("Driver check detail"))
@@ -135,6 +138,7 @@ class DriverCheckStrip(QtWidgets.QFrame):
         top.addWidget(self.passed_headline)
         top.addWidget(self.side_detail, 1)
         top.addWidget(self.headline, 1)
+        top.addWidget(self.active_label)
         top.addWidget(self.action_button)
         top.addWidget(self.details_button)
         top.addWidget(self.recheck_button)
@@ -227,6 +231,11 @@ class DriverCheckStrip(QtWidgets.QFrame):
     def _act(self) -> None:
         if self.strip.action:
             self.action_requested.emit(self.strip.action)
+
+    def set_active(self, text: str, detail: str = "") -> None:
+        """Show the short form of the driver card's indicator."""
+        self.active_label.setText(text)
+        self.active_label.setToolTip(detail)
 
     def _show(self, strip: ds.Strip) -> None:
         self.strip = strip

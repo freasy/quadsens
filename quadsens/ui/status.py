@@ -175,6 +175,65 @@ class ElideLabel(QtWidgets.QLabel):
         self.update()
 
 
+class ActiveIndicator(QtWidgets.QFrame):
+    """Says whether the driver is applying the values: mark, headline, one line of detail.
+
+    The tint comes from the kind of the state, the meaning from the mark and
+    the words. Nothing moves.
+    """
+
+    def __init__(self, accessible_name: str, parent: QtWidgets.QWidget | None = None,
+                 wrap: bool = False) -> None:
+        """``wrap``: let the detail take as many lines as it needs instead of
+        cutting it. For places that may grow; the default keeps to one line."""
+        super().__init__(parent)
+        self._name = accessible_name
+        self.kind = ""
+        self.mark = QtWidgets.QLabel()
+        self.mark.setObjectName("bannerMark")
+        font = self.mark.font()
+        font.setBold(True)
+        self.mark.setFont(font)
+        self.mark.setFixedWidth(self.mark.fontMetrics().horizontalAdvance("⚠") + 4)
+        self.mark.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.headline = ElideLabel()
+        bold = self.headline.font()
+        bold.setWeight(QtGui.QFont.Weight.DemiBold)
+        self.headline.setFont(bold)
+        self.detail: QtWidgets.QLabel = caption(
+            WrapLabel(accessible_name + " detail") if wrap else ElideLabel())
+        self.detail.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        top = QtWidgets.QHBoxLayout()
+        top.setSpacing(SPACE_S)
+        top.addWidget(self.mark)
+        top.addWidget(self.headline, 1)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(SPACE_S, 2, SPACE_S, 2)
+        layout.setSpacing(0)
+        layout.addLayout(top)
+        layout.addWidget(self.detail)
+        self.setProperty("banner", "")
+
+    def show_state(self, mark: str, headline: str, detail: str, tint: str,
+                   kind: str = "") -> None:
+        self.kind = kind
+        self.mark.setText(mark)
+        self.headline.setText(headline)
+        self.detail.setText(detail)
+        self.detail.setToolTip(detail)
+        self.setAccessibleName("%s: %s. %s" % (self._name, headline, detail))
+        if self.property("banner") != tint:
+            self.setProperty("banner", tint)
+            style = self.style()
+            style.unpolish(self)
+            style.polish(self)
+            self.update()
+
+    def text(self) -> str:
+        return "%s %s" % (self.mark.text(), self.headline.text())
+
+
 class WrapLabel(QtWidgets.QLabel):
     """Plain-text label that wraps, never widens its parent and is never cut off.
 

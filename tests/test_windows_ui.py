@@ -30,6 +30,8 @@ except ImportError:  # pragma: no cover - depends on the environment
 from quadsens import (
     emulator,
     rawaccel,
+    rawaccel_live,
+    win_autostart,
     usbip_mouse,
     usbip_server,
     values_file,
@@ -38,7 +40,7 @@ from quadsens import (
 from quadsens.model import Scalars
 from quadsens.rawaccel import Four
 from quadsens import win_download, win_tools
-from quadsens.ui import tools_strip
+from quadsens.ui import tools_strip, windows_window
 from quadsens.ui.windows_window import WindowsMainWindow
 from quadsens.win_tools import RAWACCEL, USBIP
 from quadsens.usbip_client import UsbipClient
@@ -54,6 +56,27 @@ VALUES = Scalars(1.011, 0.991, 1.006, 0.996)
 # The stand-in for writer.exe is a shell script, which only POSIX can start.
 POSIX = os.name == "posix"
 needs_fake_writer = unittest.skipUnless(POSIX, "the stand-in for writer.exe is a shell script")
+
+
+class FakeRegistry:
+    """The Run key of the user, in memory."""
+
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+        self.fail = False
+
+    def get(self, name: str) -> str | None:
+        return self.values.get(name)
+
+    def set(self, name: str, value: str) -> None:
+        if self.fail:
+            raise PermissionError(13, "Access is denied")
+        self.values[name] = value
+
+    def delete(self, name: str) -> None:
+        if self.fail:
+            raise PermissionError(13, "Access is denied")
+        self.values.pop(name, None)
 
 
 class WindowCase(unittest.TestCase):
@@ -77,6 +100,10 @@ class WindowCase(unittest.TestCase):
         self.install_tools: win_install.Tools | None = None
         self.driver_state = win_install.DRIVER_READY
         self.latest_release = None
+        # RawAccel's driver and the startup entries of the user.
+        self.live = rawaccel_live.Live(rawaccel_live.UNAVAILABLE)
+        self.registry = FakeRegistry()
+        self.windows_started: float | None = None
 
     def tearDown(self) -> None:
         for window in self.windows:
@@ -119,7 +146,10 @@ class WindowCase(unittest.TestCase):
                                    find_client=find_client, mouse_factory=mouse_factory,
                                    install_tools=self.install_tools,
                                    driver_state=lambda installed_at: self.driver_state,
-                                   latest_release=self.latest_release)
+                                   latest_release=self.latest_release,
+                                   read_live=lambda: self.live,
+                                   registry=self.registry,
+                                   started=lambda: self.windows_started)
         window.opened: list[str] = []
         window.open_url = lambda url: window.opened.append(url.toString())
         self.windows.append(window)
@@ -194,7 +224,8 @@ class WindowsWindowTest(WindowCase):
         self.assertEqual(window.mouse_panel.toggle_button.text(), "&Start virtual mouse")
         self.assertTrue(window.mouse_panel.log_box.isHidden())       # collapsed
         self.assertIn("import a values file", window.calibration_panel.message.text())
-        self.assertIn("forgets its settings", window.rawaccel_panel.boot_label.text())
+        self.assertIn("Values are lost when Windows restarts",
+                      window.rawaccel_panel.boot_label.text())
         self.assertFalse(window.rawaccel_panel.apply_button.isEnabled())
         self.assertIn("Choose the RawAccel folder", window.rawaccel_panel.state_label.text())
         # Small windows scroll, so the minimum stays small whatever the cards need.
@@ -208,8 +239,10 @@ class WindowsWindowTest(WindowCase):
         scale = widths.font_scale()
         self.assertLessEqual(content.minimumSizeHint().width(), (760 - 16) * scale,
                              widths.report(content))
-        self.assertLessEqual(content.minimumSizeHint().height(), (720 - 30) * scale,
+        self.assertLessEqual(content.minimumSizeHint().height(),
+                             (windows_window.DEFAULT_SIZE[1] - 30) * scale,
                              widths.report(content))
+        self.assertLessEqual(windows_window.DEFAULT_SIZE[1], 800)
 
     @needs_fake_writer
     def test_walk_through_import_folder_preview_apply(self) -> None:
@@ -1006,6 +1039,157 @@ class ToolsTest(WindowCase):
         window.info_box.close()
         self.assertFalse(any("ninstall" in button.text() or "emove" in button.text()
                              for button in window.findChildren(QtWidgets.QAbstractButton)))
+
+
+class ActiveAndAutostartTest(WindowCase):
+    """The indicator of RawAccel's driver and the startup entry."""
+
+    APPLIED = Four(1011.0, 0.995054, 0.980218, 0.99006)
+    OWN = Four(1000.0, 1.0, 1.0, 1.0)
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.windows_started = time.time() - 3600
+
+    def live_ok(self, four: Four) -> rawaccel_live.Live:
+        return rawaccel_live.Live(rawaccel_live.OK, (1, 7, 0), (("default", four),))
+
+    def apply(self, window: WindowsMainWindow) -> None:
+        window.rawaccel_panel.set_values(VALUES)
+        window.rawaccel_panel.apply_button.click()
+        self.wait(window)
+
+    @needs_fake_writer
+    def test_read_back_from_the_driver_after_apply(self) -> None:
+        self.live = self.live_ok(self.OWN)
+        window = self.make()
+        window.show()
+        panel = window.rawaccel_panel
+        indicator = panel.indicator
+        self.assertEqual(indicator.text(), "○ Neutral: the driver holds the profile's own values")
+        _app.processEvents()
+        self.assertGreater(indicator.y(), panel.apply_button.y())
+        self.assertLess(indicator.y() - panel.apply_button.geometry().bottom(), 16)
+
+        self.live = self.live_ok(self.APPLIED)          # what the driver holds after the writer
+        self.apply(window)
+        self.assertEqual(indicator.text(), "✓ Active in driver")
+        self.assertEqual(indicator.property("banner"), "success")
+        self.assertRegex(indicator.detail.text(),
+                         r"^Applied \d\d:\d\d:\d\d, read back from the driver: output DPI 1011, "
+                         r"Y/X 0\.995054, L/R 0\.980218, U/D 0\.99006\.$")
+        self.assertIn("Active in driver", indicator.accessibleName())
+        self.assertEqual(window.tools_strip.active_label.text(), "✓ Active in driver")
+
+        # RawAccel's own window changes something: the next look notices.
+        self.live = self.live_ok(Four(1200.0, 1.0, 1.0, 1.0))
+        panel.watch()
+        self.assertEqual(indicator.text(), "≠ Active, but different from QuadSens")
+        self.assertIn("output DPI 1200", indicator.detail.text())
+        self.assertEqual(window.tools_strip.active_label.text(), indicator.text())
+
+        # After a restart of Windows the driver holds nothing.
+        self.live = rawaccel_live.Live(rawaccel_live.EMPTY, (1, 7, 0))
+        panel.watch()
+        self.assertEqual(indicator.text(), "⚠ Not applied since Windows started")
+        self.assertEqual(indicator.property("banner"), "warning")
+
+    @needs_fake_writer
+    def test_without_a_readable_driver_it_says_sent_and_notices_a_restart(self) -> None:
+        self.live = rawaccel_live.Live(rawaccel_live.OTHER_VERSION, (1, 6, 1))
+        window = self.make()
+        window.show()
+        panel = window.rawaccel_panel
+        self.assertEqual(panel.indicator.text(), "⚠ Not applied by QuadSens yet")
+        self.apply(window)
+        self.assertRegex(panel.indicator.text(),
+                         r"^✓ Sent to the driver \d\d:\d\d:\d\d, accepted by RawAccel's writer$")
+        self.assertIn("Cannot be read back", panel.indicator.detail.text())
+        self.assertIn("1.6.1", panel.indicator.detail.text())
+        self.assertNotIn("Active", panel.indicator.text())
+        self.windows_started = time.time() + 60          # Windows was restarted since
+        panel.watch()
+        self.assertEqual(panel.indicator.text(), "⚠ Not applied since Windows started")
+
+    @needs_fake_writer
+    def test_a_writer_that_refuses_is_not_called_sent(self) -> None:
+        self.writer(1, "Bad settings")
+        window = self.make()
+        window.show()
+        self.apply(window)
+        self.assertEqual(window.rawaccel_panel.indicator.text(),
+                         "⚠ Not applied by QuadSens yet")
+        self.assertIsNone(window._settings.value("rawaccel/sent_at"))
+
+    def test_driver_missing_or_restart_pending(self) -> None:
+        self.driver_state = win_install.DRIVER_MISSING
+        window = self.make()
+        window.show()
+        self.assertEqual(window.rawaccel_panel.indicator.text(),
+                         "✕ Not active: RawAccel's driver is not installed")
+        self.driver_state = win_install.DRIVER_PENDING
+        window.rawaccel_panel.watch()
+        self.assertEqual(window.rawaccel_panel.indicator.text(),
+                         "✕ Not active yet: restart Windows")
+        self.assertEqual(window.tools_strip.active_label.text(),
+                         "✕ Not active yet: restart Windows")
+
+    def test_autostart_is_off_until_ticked_and_gone_when_unticked(self) -> None:
+        window = self.make()
+        panel = window.rawaccel_panel
+        check = panel.autostart_check
+        self.assertFalse(check.isChecked())
+        self.assertEqual(self.registry.values, {})
+        self.assertEqual(panel.boot_label.text(), "Values are lost when Windows restarts.")
+        for words in ("HKEY_CURRENT_USER", "writer.exe", "Task Manager", "sign-in",
+                      "no administrator rights"):
+            self.assertIn(words, check.toolTip())
+        check.click()
+        self.assertTrue(check.isChecked())
+        self.assertEqual(self.registry.values, {
+            win_autostart.VALUE_NAME: win_autostart.command(self.folder)})
+        self.assertIn(str(self.folder / "writer.exe"),
+                      self.registry.values[win_autostart.VALUE_NAME])
+        self.assertIn("At every sign-in", panel.boot_label.text())
+        self.assertIn("At every sign-in", check.accessibleDescription())
+        check.click()
+        self.assertFalse(check.isChecked())
+        self.assertEqual(self.registry.values, {})
+        self.assertEqual(panel.boot_label.text(), "Values are lost when Windows restarts.")
+
+    def test_autostart_reflects_what_is_there_and_follows_the_folder(self) -> None:
+        self.registry.values[win_autostart.VALUE_NAME] = win_autostart.command(self.folder)
+        window = self.make()
+        panel = window.rawaccel_panel
+        self.assertTrue(panel.autostart_check.isChecked())          # found, not created
+        other = self.tmp / "Other" / "RawAccel"
+        shutil.copytree(self.folder, other)
+        panel.choose_folder(str(other))
+        self.assertEqual(self.registry.values[win_autostart.VALUE_NAME],
+                         win_autostart.command(other))
+        self.assertTrue(panel.autostart_check.isChecked())
+        # An entry that points elsewhere (changed by hand) is shown as such.
+        self.registry.values[win_autostart.VALUE_NAME] = \
+            '"D:\\Old\\RawAccel\\writer.exe" "D:\\Old\\RawAccel\\settings.json"'
+        panel.reload()
+        self.assertTrue(panel.autostart_check.isChecked())
+        self.assertIn("another folder (D:\\Old\\RawAccel)", panel.boot_label.text())
+        panel.autostart_check.click()                               # untick removes it
+        self.assertEqual(self.registry.values, {})
+
+    def test_autostart_needs_a_folder_and_reports_a_registry_that_refuses(self) -> None:
+        window = self.make(choose=False)
+        panel = window.rawaccel_panel
+        self.assertFalse(panel.autostart_check.isEnabled())
+        self.assertIn("Needs the RawAccel folder", panel.boot_label.text())
+        panel.choose_folder(str(self.folder))
+        self.assertTrue(panel.autostart_check.isEnabled())
+        self.registry.fail = True
+        panel.autostart_check.click()
+        self.assertFalse(panel.autostart_check.isChecked())
+        self.assertIn("could not be written", panel.boot_label.text())
+        self.assertIn("Access is denied", panel.boot_label.text())
+        self.assertEqual(self.registry.values, {})
 
 
 class ImportCleanlinessTest(unittest.TestCase):

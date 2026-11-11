@@ -131,6 +131,10 @@ class ToolsStrip(QtWidgets.QFrame):
             "Pick the folder of a RawAccel you unpacked yourself (it holds rawaccel.exe).")
         self.choose_button.setAccessibleDescription(self.choose_button.toolTip())
         self.choose_button.clicked.connect(self.choose_folder_requested.emit)
+        # Mirror of the indicator in the RawAccel card: is the driver applying values?
+        self.active_label = ElideLabel()
+        self.active_label.setAccessibleName("Whether RawAccel's driver is applying values")
+        self.raw.layout.addWidget(self.active_label)
         self.raw.layout.addWidget(self.choose_button)
 
         self.recheck_button = QtWidgets.QToolButton()
@@ -178,6 +182,11 @@ class ToolsStrip(QtWidgets.QFrame):
         return [self.usbip.install_button, self.recheck_button, self.raw.install_button,
                 self.choose_button, *self.link_buttons.values()]
 
+    def set_active(self, text: str, detail: str = "") -> None:
+        """Show the short form of the RawAccel card's indicator."""
+        self.active_label.setText(text)
+        self.active_label.setToolTip(detail)
+
     def set_notice(self, key: str, text: str, link: str = "") -> None:
         """Show (or with "" remove) the line about a newer release of a tool."""
         if text:
@@ -207,9 +216,9 @@ class ToolsStrip(QtWidgets.QFrame):
                         "You are asked before anything happens.")
         self.detail.setText(
             "" if self.found else
-            "The virtual mouse needs this USB/IP driver (its usbip.exe was not found). Its "
-            "installer asks for administrator rights and restarts the USB hubs for a "
-            "moment. Without it you can still import or type the values and apply them.")
+            "The virtual mouse needs this USB/IP driver (usbip.exe was not found). Its "
+            "installer asks for administrator rights and restarts the USB hubs. Without "
+            "it you can still import or type the values and apply them.")
         self.detail.setVisible(not self.found)
 
     def refresh_rawaccel(self) -> None:

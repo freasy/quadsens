@@ -105,6 +105,8 @@ class MainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
         self.mouse_panel.log_toggle.toggled.connect(self._share_space)
         self.calibration_panel.calibration_changed.connect(self.update_steps)
         self.driver_panel.changed.connect(self.update_steps)
+        self.driver_panel.changed.connect(self._mirror_active)
+        self._mirror_active()
         self.driver_panel.applied.connect(self._driver_applied)
         self.driver_panel.flip_changed.connect(self.calibration_panel.set_flip_y)
         self.steps_bar.action_requested.connect(self.run_step)
@@ -270,6 +272,10 @@ class MainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
             # Back to the raw mouse: only a calibration from now on is a new one.
             self._baseline = time.time()
         self.update_steps()
+
+    def _mirror_active(self) -> None:
+        shown = self.driver_panel.active
+        self.driver_strip.set_active(shown.short(), shown.detail)
 
     def flow_state(self) -> FlowState:
         """The facts the step display is derived from."""

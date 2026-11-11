@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
-from .. import rawaccel
+from .. import active, rawaccel, rawaccel_live, win_autostart
 from ..calibration import Result, driver_scalars
 from ..model import SCALE_MAX, SCALE_MIN, Scalars
 from ..rawaccel import Four, RawAccelError
@@ -15,6 +16,7 @@ from .scale_spin import ScaleSpinBox
 from .status import (
     SPACE_M,
     SPACE_S,
+    ActiveIndicator,
     Card,
     ElideLabel,
     Disclosure,
@@ -29,8 +31,14 @@ ROW_TITLES: tuple[str, ...] = ("→ &Right:", "← &Left:", "↓ &Down:", "↑ &
 DIRECTIONS: tuple[str, ...] = ("right", "left", "down", "up")
 DECIMALS = 4
 NO_VALUE = "–"
-BOOT_HINT = ("RawAccel forgets its settings when Windows shuts down. The values stay in "
-             "settings.json; whatever loads that file at start brings them back.")
+WATCH_MS = 3000          # how often the driver is asked again while the card is visible
+AUTOSTART_TIP = (
+    "RawAccel's driver forgets its settings when Windows shuts down. With this ticked, "
+    "QuadSens writes one value into the registry of your user account (" +
+    win_autostart.WHERE + ", name \"" + win_autostart.VALUE_NAME + "\") that runs "
+    "RawAccel's writer.exe with this settings.json at every sign-in. Unticking removes "
+    "it. Nothing else is installed and no administrator rights are needed. To remove it "
+    "by hand: Task Manager > Startup apps.")
 FLIP_HINT = ("The up/down mapping was verified on Linux only. Switch this on if up and "
              "down feel swapped after applying.")
 
@@ -49,8 +57,23 @@ class RawAccelPanel(Card):
     def __init__(self, settings: QtCore.QSettings,
                  get_result: Callable[[], Result | None],
                  environ: Mapping[str, str] | None = None,
-                 parent: QtWidgets.QWidget | None = None) -> None:
+                 parent: QtWidgets.QWidget | None = None,
+                 read_live: Callable[[], rawaccel_live.Live] = rawaccel_live.read_driver,
+                 driver_state: Callable[[], str] = lambda: "",
+                 started: Callable[[], float | None] = lambda: None,
+                 registry: win_autostart.Registry | None = None) -> None:
         super().__init__("RawAccel", parent)
+        # What tells whether the driver is applying the values, and the startup
+        # entry: both can be replaced, which the tests do.
+        self._read_live = read_live
+        self._driver_state = driver_state
+        self._started = started
+        self._registry = registry if registry is not None else \
+            win_autostart.default_registry()
+        self.live = rawaccel_live.Live(rawaccel_live.UNAVAILABLE)
+        self.active = active.windows_indicator("", self.live, "")
+        self.autostart = win_autostart.State(win_autostart.OFF)
+        self._target: Four | None = None
         self._settings = settings
         self._get_result = get_result
         self._environ = os.environ if environ is None else environ
@@ -156,8 +179,16 @@ class RawAccelPanel(Card):
         self.state_label = ElideLabel()
         self.state_label.setAccessibleName("Whether the settings file holds the new values")
         self.note_label = caption(WrapLabel("How exact the result is"))
-        self.boot_label = caption(WrapLabel("About restarting Windows"))
-        self.boot_label.setText(BOOT_HINT)
+        self.indicator = ActiveIndicator("RawAccel driver activity", wrap=True)
+        self.autostart_check = QtWidgets.QCheckBox("Re-appl&y at Windows sign-in")
+        self.autostart_check.setToolTip(AUTOSTART_TIP)
+        self.autostart_check.clicked.connect(self._autostart_clicked)
+        # Beside the checkbox: what happens to the values at a restart, as it is now.
+        self.boot_label = caption(ElideLabel())
+        self.boot_label.setAccessibleName("What happens to the values at a restart")
+        self._watch = QtCore.QTimer(self)
+        self._watch.setInterval(WATCH_MS)
+        self._watch.timeout.connect(self.watch)
 
         self.use_button = QtWidgets.QPushButton("Use resul&t")
         self.use_button.setToolTip("Fill the multipliers from the calibration result or the "
@@ -201,7 +232,7 @@ class RawAccelPanel(Card):
 
         for control in (self.choose_button, self.use_button, self.reset_button,
                         self.apply_button, self.restore_button, self.flip_check,
-                        self.advanced_toggle):
+                        self.advanced_toggle, self.autostart_check):
             control.setAccessibleDescription(control.toolTip())
 
         self.message = MessageLabel("RawAccel message")
@@ -217,8 +248,13 @@ class RawAccelPanel(Card):
         layout.addWidget(self.state_label)
         layout.addWidget(self.note_label)
         layout.addLayout(buttons)
+        layout.addWidget(self.indicator)
         layout.addWidget(self.message)
-        layout.addWidget(self.boot_label)
+        autostart_row = QtWidgets.QHBoxLayout()
+        autostart_row.setSpacing(SPACE_M)
+        autostart_row.addWidget(self.autostart_check)
+        autostart_row.addWidget(self.boot_label, 1)
+        layout.addLayout(autostart_row)
         layout.addWidget(self.advanced)
         layout.addStretch(1)
 
@@ -289,6 +325,12 @@ class RawAccelPanel(Card):
 
     def set_folder(self, folder: str | os.PathLike[str], remember: bool = True) -> None:
         self.folder = Path(folder)
+        if remember:
+            # A startup entry follows the folder the user chose.
+            try:
+                win_autostart.follow_folder(self.folder, self._registry)
+            except win_autostart.AutostartError:
+                pass                    # shown by _refresh_autostart below
         self.folder_edit.setText(str(self.folder))
         self.folder_edit.setToolTip(str(self.folder))
         if remember:
@@ -424,7 +466,87 @@ class RawAccelPanel(Card):
         self.apply_button.setEnabled(idle and usable and not self.is_applied())
         self.restore_button.setEnabled(idle and usable and self.can_restore())
         self.choose_button.setEnabled(idle)
+        self._refresh_autostart()
+        self._update_indicator(read=False)
         self.changed.emit()
+
+    # ---- is the driver applying it? -----------------------------------------------
+
+    def profile_name(self) -> str:
+        if self.document is None or not self.document.profile_names:
+            return ""
+        return self.document.profile_names[self.profile_index()]
+
+    def sent_at(self) -> float | None:
+        stored = self._settings.value("rawaccel/sent_at")
+        try:
+            return float(stored) if stored is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _update_indicator(self, read: bool = True) -> bool:
+        """Work the indicator out again; True if it changed."""
+        if read:
+            self.live = self._read_live()
+        usable = self.document is not None and self.folder is not None \
+            and self.current() is not None
+        shown = active.windows_indicator(
+            self._driver_state(), self.live, self.profile_name(),
+            self._stored("sent") if usable else None, self.sent_at(),
+            self.baseline() if usable else None, self._started(),
+            self.current() if usable else None)
+        changed = shown != self.active
+        self.active = shown
+        self.indicator.show_state(shown.mark, shown.headline, shown.detail, shown.tint,
+                                  shown.kind)
+        return changed
+
+    def watch(self) -> None:
+        """Ask the driver again, cheaply, while the card is visible."""
+        if self.is_busy() or not self.isVisible():
+            return
+        if self._update_indicator():
+            self.changed.emit()
+
+    def showEvent(self, event: object) -> None:  # noqa: N802 (Qt name)
+        super().showEvent(event)        # type: ignore[arg-type]
+        self._update_indicator()
+        self._watch.start()
+
+    def hideEvent(self, event: object) -> None:  # noqa: N802 (Qt name)
+        self._watch.stop()
+        super().hideEvent(event)        # type: ignore[arg-type]
+
+    # ---- loading the settings again at sign-in ------------------------------------
+
+    def _refresh_autostart(self, problem: str = "") -> None:
+        try:
+            self.autostart = win_autostart.state(self.folder, self._registry)
+        except win_autostart.AutostartError as exc:
+            self.autostart, problem = win_autostart.State(win_autostart.OFF), str(exc)
+        self.autostart_check.blockSignals(True)
+        self.autostart_check.setChecked(self.autostart.exists)
+        self.autostart_check.blockSignals(False)
+        usable = self.folder is not None and rawaccel.writer_path(self.folder) is not None
+        self.autostart_check.setEnabled(usable or self.autostart.exists)
+        text = problem or win_autostart.describe(self.autostart)
+        if not problem and not usable and not self.autostart.exists:
+            text += " (Needs the RawAccel folder with writer.exe.)"
+        self.boot_label.setText(text)
+        self.boot_label.setToolTip(text)
+        self.autostart_check.setAccessibleDescription(AUTOSTART_TIP + " Now: " + text)
+
+    def _autostart_clicked(self, checked: bool) -> None:
+        """The only place that creates or removes the startup entry."""
+        problem = ""
+        try:
+            if checked and self.folder is not None:
+                win_autostart.enable(self.folder, self._registry)
+            else:
+                win_autostart.disable(self._registry)
+        except win_autostart.AutostartError as exc:
+            problem = str(exc)
+        self._refresh_autostart(problem)
 
     # ---- writing ------------------------------------------------------------------
 
@@ -459,6 +581,7 @@ class RawAccelPanel(Card):
             return
         self._store("baseline", baseline)
         self._store("written", target)
+        self._target = target
         self._settings.sync()
         self._what = "restored" if restore else "written"
         self._backup = backup
@@ -484,6 +607,12 @@ class RawAccelPanel(Card):
         if self._backup is not None:
             what += f" The original file was kept as {self._backup.name}."
         if result.ok:
+            # RawAccel's writer accepted it: that, and when, is what the indicator
+            # can say even where the driver cannot be read back.
+            if self._target is not None and self.document is not None:
+                self._store("sent", self._target)
+                self._settings.setValue("rawaccel/sent_at", time.time())
+            self.live = self._read_live()
             self.message.show_message(f"✓ {what} {result.message}")
         else:
             self.message.show_message(f"{what} {result.message}",
