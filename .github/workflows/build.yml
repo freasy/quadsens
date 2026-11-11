@@ -14,9 +14,11 @@ on:
 permissions:
   contents: read
 
+# Linux jobs are pinned to ubuntu-24.04: on 2026-11-11 the newer ubuntu-latest
+# image could not reach its package mirrors in three consecutive runs.
 jobs:
   test-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -72,7 +74,7 @@ jobs:
 
   build-linux:
     needs: test-linux
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
