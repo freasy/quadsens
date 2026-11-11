@@ -21,10 +21,27 @@ attach.cpp, detach.cpp, port.cpp, README.md; master branch):
 * The README's uninstall instructions name C:\\Program Files\\USBip as the
   install folder.
 
-Assumed, not confirmed: that the installer puts usbip.exe on PATH; that
-attach works from a normal (not elevated) prompt; the exact error texts for
-"driver not installed" and "access denied" (they are Windows system messages
-and depend on the system language, so they are matched loosely).
+* usbip.exe and the USBip app (wusbip.exe) both link libusbip and attach
+  through the same calls: vhci::open(), a CreateFile on the device interface
+  GUID_DEVINTERFACE_USBIP_VHCI, then vhci::attach(). Neither project file
+  asks for an execution level. Whatever rights the app needs, usbip.exe
+  needs the same.
+* The installer (userspace/innosetup/setup.iss) needs administrator rights,
+  installs into {autopf}\<product name> and always installs usbip.exe (the
+  components "main" and "client" are fixed; the app is optional). Nothing in
+  it adds the folder to PATH, so the look in Program Files is what finds it.
+
+Verified on one Windows 11 VM: attaching this device without elevation
+through the usbip-win2 app. The automatic attach through usbip.exe from
+QuadSens is not yet verified on Windows.
+
+Assumed, not confirmed: the exact error texts for "driver not installed" and
+"access denied" (they are Windows system messages and depend on the system
+language, so they are matched loosely).
+
+QuadSens never asks for elevation. When the attach fails or usbip.exe is not
+found, the message names the fallback: attach with the USBip app to
+127.0.0.1; the server keeps serving and notices an attach made elsewhere.
 
 The command runner is injected, so everything here is tested on Linux.
 """
@@ -36,6 +53,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
@@ -43,10 +61,16 @@ RELEASES_URL = "https://github.com/vadimgrn/usbip-win2/releases"
 TOOL = "usbip"
 INSTALL_FOLDER = "USBip"
 TIMEOUT = 20.0
+ATTACH_TRIES = 3          # the first try can be too early for the server
+RETRY_PAUSE = 0.4
+MANUAL_STEPS = ("open the USBip app that comes with usbip-win2, enter 127.0.0.1 and attach "
+                "the device there; QuadSens keeps serving and notices it.")
+MANUAL = "As a fallback, " + MANUAL_STEPS
 
 # How a command ended.
-OK, NOT_INSTALLED, DRIVER_MISSING, DENIED, UNREACHABLE, ALREADY, FAILED = (
-    "ok", "not installed", "driver missing", "denied", "unreachable", "already", "failed")
+OK, NOT_INSTALLED, DRIVER_MISSING, DENIED, UNREACHABLE, ALREADY, FAILED, TIMED_OUT = (
+    "ok", "not installed", "driver missing", "denied", "unreachable", "already", "failed",
+    "timed out")
 
 Runner = Callable[[list[str], float], "tuple[int, str]"]
 
@@ -80,28 +104,6 @@ def find_tool(environ: Mapping[str, str] | None = None,
             if exists(candidate):
                 return candidate
     return None
-
-
-def is_protected_location(path: str, environ: Mapping[str, str] | None = None) -> bool:
-    """Whether ``path`` lies in a folder only administrators can write to.
-
-    Only a program from Program Files or the Windows folder is ever offered
-    for "Run as administrator"; a usbip.exe from a download or temp folder
-    is not.
-    """
-    environ = os.environ if environ is None else environ
-    full = ntpath.normcase(ntpath.normpath(path))
-    if not ntpath.isabs(full) or ".." in full.split("\\"):
-        return False
-    for variable in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)", "SystemRoot",
-                     "windir"):
-        base = environ.get(variable)
-        if not base:
-            continue
-        root = ntpath.normcase(ntpath.normpath(base)).rstrip("\\") + "\\"
-        if len(root) > 4 and full.startswith(root):
-            return True
-    return False
 
 
 def classify(output: str) -> str:
@@ -141,20 +143,24 @@ def explain(kind: str, command: str, output: str = "") -> str:
     detail = " ".join(output.split())
     detail = f" ({detail[:200]})" if detail else ""
     if kind == NOT_INSTALLED:
-        return ("usbip-win2 is not installed, so the virtual mouse cannot be attached. "
-                "The values can still be imported or typed.")
+        return ("usbip.exe of usbip-win2 was not found, so QuadSens cannot attach the "
+                "virtual mouse itself. If usbip-win2 is not installed, the values can "
+                "still be imported or typed. If it is installed, " + MANUAL_STEPS)
     if kind == DRIVER_MISSING:
         return ("usbip.exe is there, but its driver did not answer" + detail + ". Install "
-                "usbip-win2 again (its installer needs administrator rights).")
+                "usbip-win2 again (its installer needs administrator rights). " + MANUAL)
     if kind == DENIED:
         return ("Windows refused the attach" + detail + ". Open a console as "
-                "administrator and run: " + command)
+                "administrator and run: " + command + " " + MANUAL)
     if kind == UNREACHABLE:
         return ("usbip.exe could not reach the virtual mouse on this PC" + detail +
-                ". A firewall may be blocking port 3240 on 127.0.0.1.")
+                ". A firewall may be blocking the port on 127.0.0.1. " + MANUAL)
     if kind == ALREADY:
         return "The device is attached already" + detail + "."
-    return "usbip.exe failed" + detail + ". The command was: " + command
+    if kind == TIMED_OUT:
+        return ("usbip.exe did not answer in time, so the device is not attached. "
+                "Stop and start the virtual mouse to try again. " + MANUAL)
+    return ("usbip.exe failed" + detail + ". The command was: " + command + " " + MANUAL)
 
 
 PORT_LINE = re.compile(r"^\s*Port\s+(\d+)\s*:", re.IGNORECASE)
@@ -181,7 +187,9 @@ class UsbipClient:
     """usbip.exe, for the one device this application exports."""
 
     def __init__(self, tool: str | None, runner: Runner = run_command,
-                 host: str = "127.0.0.1", tcp_port: int = 3240, busid: str = "1-1") -> None:
+                 host: str = "127.0.0.1", tcp_port: int = 3240, busid: str = "1-1",
+                 sleep: Callable[[float], None] = time.sleep) -> None:
+        self.sleep = sleep
         self.tool = tool
         self.runner = runner
         self.host = host
@@ -226,12 +234,20 @@ class UsbipClient:
         return 0
 
     def attach(self) -> Outcome:
-        """Attach our device. Never asks for elevation by itself."""
+        """Attach our device. Never asks for elevation."""
         if self.tool is None:
             return Outcome(NOT_INSTALLED, explain(NOT_INSTALLED, ""))
         argv = self.attach_command()
         command = command_line(argv)
-        code, output = self.runner(argv, TIMEOUT)
+        for attempt in range(ATTACH_TRIES):
+            code, output = self.runner(argv, TIMEOUT)
+            # Only "nobody listens yet" is worth another try.
+            if code == 0 or code == 124 or classify(output) != UNREACHABLE:
+                break
+            if attempt + 1 < ATTACH_TRIES:
+                self.sleep(RETRY_PAUSE)
+        if code == 124:
+            return Outcome(TIMED_OUT, explain(TIMED_OUT, command), 0, command)
         if code == 0:
             match = re.search(r"(\d+)\s*$", output.strip()) or re.search(r"port\s+(\d+)", output)
             port = int(match.group(1)) if match else self.our_port()
@@ -263,23 +279,3 @@ class UsbipClient:
         return Outcome(kind, "The device could not be detached (%s). Detach it by hand: %s"
                        % (" ".join(output.split())[:200], command_line(argv)), port,
                        command_line(argv))
-
-
-def can_offer_elevation(tool: str | None, environ: Mapping[str, str] | None = None) -> bool:
-    """Whether "Run as administrator" may be offered for this usbip.exe."""
-    return tool is not None and is_protected_location(tool, environ)
-
-
-def run_elevated(argv: list[str]) -> bool:
-    """Start a command through the Windows UAC prompt. True if it was started.
-
-    The caller must have checked can_offer_elevation(). Windows only; the
-    user sees the standard prompt and can decline.
-    """
-    if os.name != "nt":
-        return False
-    import ctypes
-    parameters = subprocess.list2cmdline(argv[1:])
-    result = ctypes.windll.shell32.ShellExecuteW(   # type: ignore[attr-defined]
-        None, "runas", argv[0], parameters, None, 0)
-    return int(result) > 32

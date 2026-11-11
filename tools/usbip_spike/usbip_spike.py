@@ -46,6 +46,7 @@ from quadsens.usbip_server import (  # noqa: E402
     Server,
     UsbDevice,
     enumerate_device,
+    format_event,
 )
 
 # ---------------------------------------------------------------------------
@@ -80,20 +81,7 @@ class Logger:
 
     @staticmethod
     def text(entry: dict[str, Any]) -> str:
-        stamp = time.strftime("%H:%M:%S", time.localtime(entry.get("t", time.time())))
-        event = entry.get("event")
-        if event == "usbip":
-            rest = " ".join("%s=%s" % (k, v) for k, v in entry.items()
-                            if k not in ("t", "event", "op"))
-            return "%s usbip   %-14s %s" % (stamp, entry.get("op"), rest)
-        if event == "control":
-            rest = " ".join("%s=%s" % (k, v) for k, v in entry.items()
-                            if k not in ("t", "event", "name", "status"))
-            return "%s control %-32s %-5s %s" % (stamp, entry.get("name"),
-                                                 entry.get("status"), rest)
-        if event == "server":
-            return "%s server  %s" % (stamp, entry.get("message"))
-        return "%s hid     %s" % (stamp, emulator.format_entry(entry).split(" ", 1)[1])
+        return format_event(entry)
 
     def close(self) -> None:
         if self.file is not None:

@@ -104,23 +104,6 @@ class FindToolTest(unittest.TestCase):
                                                  lambda path: False))
         self.assertIsNone(usbip_client.find_tool({}, lambda name: None, lambda path: True))
 
-    def test_protected_locations(self) -> None:
-        for path in (TOOL, "c:\\program files\\usbip\\USBIP.EXE",
-                     "C:\\Windows\\System32\\usbip.exe",
-                     "C:\\Program Files (x86)\\USBip\\usbip.exe"):
-            self.assertTrue(usbip_client.is_protected_location(path, PROGRAM_FILES), path)
-        for path in ("C:\\Users\\someone\\Downloads\\usbip.exe", "usbip.exe",
-                     "C:\\Program Files\\..\\Users\\x\\usbip.exe",
-                     "C:\\Program FilesEvil\\usbip.exe", "D:\\tools\\usbip.exe",
-                     "C:\\Temp\\Program Files\\USBip\\usbip.exe"):
-            self.assertFalse(usbip_client.is_protected_location(path, PROGRAM_FILES), path)
-        self.assertFalse(usbip_client.is_protected_location(TOOL, {}))
-        self.assertTrue(usbip_client.can_offer_elevation(TOOL, PROGRAM_FILES))
-        self.assertFalse(usbip_client.can_offer_elevation(None, PROGRAM_FILES))
-        self.assertFalse(usbip_client.can_offer_elevation(
-            "C:\\Users\\x\\usbip.exe", PROGRAM_FILES))
-
-
 class ClientTest(unittest.TestCase):
     def client(self, replies: dict[str, tuple[int, str]]) -> tuple[UsbipClient, list[str]]:
         calls: list[str] = []
@@ -162,8 +145,9 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(client.attach().port, 7)
         missing = UsbipClient(None).attach()
         self.assertEqual(missing.kind, usbip_client.NOT_INSTALLED)
-        self.assertIn("not installed", missing.message)
+        self.assertIn("usbip.exe of usbip-win2 was not found", missing.message)
         self.assertIn("imported or typed", missing.message)
+        self.assertIn("open the USBip app", missing.message)      # the manual way
         cases = {
             "error: Access is denied.": (usbip_client.DENIED, "administrator"),
             "error: The system cannot find the file specified.":
@@ -177,9 +161,52 @@ class ClientTest(unittest.TestCase):
             outcome = client.attach()
             self.assertEqual(outcome.kind, kind, text)
             self.assertIn(expected, outcome.message)
+            self.assertIn("USBip app", outcome.message)           # fallback in every failure
+            self.assertIn("127.0.0.1", outcome.message)
             self.assertFalse(outcome.ok)
         denied = self.client({"attach": (1, "Access is denied.")})[0].attach()
         self.assertIn("usbip.exe\" attach -r 127.0.0.1 -b 1-1", denied.message)
+
+    def test_attach_is_retried_briefly_when_the_server_is_not_reachable_yet(self) -> None:
+        replies = [(1, "error: actively refused"), (1, "error: actively refused"), (0, "4\n")]
+        pauses: list[float] = []
+        calls: list[list[str]] = []
+
+        def runner(argv: list[str], _timeout: float) -> tuple[int, str]:
+            calls.append(argv)
+            return replies[len(calls) - 1]
+        client = UsbipClient(TOOL, runner, sleep=pauses.append)
+        outcome = client.attach()
+        self.assertEqual((outcome.ok, outcome.port, len(calls)), (True, 4, 3))
+        self.assertEqual(pauses, [usbip_client.RETRY_PAUSE] * 2)
+        # It gives up after a few tries, and other failures are not retried at all.
+        calls.clear()
+        replies[:] = [(1, "error: actively refused")] * 5
+        self.assertEqual(client.attach().kind, usbip_client.UNREACHABLE)
+        self.assertEqual(len(calls), usbip_client.ATTACH_TRIES)
+        calls.clear()
+        replies[:] = [(1, "Access is denied.")] * 5
+        self.assertEqual(client.attach().kind, usbip_client.DENIED)
+        self.assertEqual(len(calls), 1)
+
+    def test_attach_that_does_not_come_back_times_out_with_a_clear_message(self) -> None:
+        timeouts: list[float] = []
+
+        def runner(_argv: list[str], timeout: float) -> tuple[int, str]:
+            timeouts.append(timeout)
+            return 124, "the command did not finish in time"
+        outcome = UsbipClient(TOOL, runner, sleep=lambda s: None).attach()
+        self.assertEqual(outcome.kind, usbip_client.TIMED_OUT)
+        self.assertEqual(timeouts, [usbip_client.TIMEOUT])            # one bounded try
+        self.assertIn("did not answer in time", outcome.message)
+        self.assertIn("USBip app", outcome.message)
+
+    def test_usbip_is_run_without_a_console_window(self) -> None:
+        import inspect
+        source = inspect.getsource(usbip_client.run_command)
+        self.assertIn("0x08000000", source)            # CREATE_NO_WINDOW
+        self.assertIn("capture_output=True", source)
+        self.assertIn("stdin=subprocess.DEVNULL", source)
 
     def test_already_attached_counts_when_it_is_ours(self) -> None:
         client, _ = self.client({"attach": (1, "error: device is already attached"),
@@ -222,8 +249,6 @@ class ClientTest(unittest.TestCase):
         code, output = usbip_client.run_command(["/nonexistent/usbip.exe", "port"], 2.0)
         self.assertEqual(code, 127)
         self.assertTrue(output)
-        self.assertFalse(usbip_client.run_elevated(["x"]) if __import__("os").name != "nt"
-                         else False)
 
 
 class ServerThreadTest(unittest.TestCase):
@@ -290,13 +315,10 @@ class ServerThreadTest(unittest.TestCase):
 
 
 class VirtualMouseTest(unittest.TestCase):
-    def make(self, tool: str | None = TOOL, environ: dict | None = None):
+    def make(self, tool: str | None = TOOL):
         driver = FakeDriver()
-        self.elevated: list[list[str]] = []
         mouse = usbip_mouse.VirtualMouse(
-            UsbipClient(tool, driver), VirtualMouseServer(port=0),
-            elevate=lambda argv: self.elevated.append(argv) or True,
-            environ=PROGRAM_FILES if environ is None else environ)
+            UsbipClient(tool, driver), VirtualMouseServer(port=0))
         self.addCleanup(mouse.close)
         return mouse, driver
 
@@ -340,13 +362,15 @@ class VirtualMouseTest(unittest.TestCase):
         self.settle(mouse)
         self.assertEqual(mouse.state, usbip_mouse.SERVING)
         self.assertEqual(mouse.problem, usbip_client.NOT_INSTALLED)
-        self.assertIn("not installed", mouse.message)
+        self.assertIn("was not found", mouse.message)
+        self.assertEqual(mouse.state_text(),
+                         "Serving on 127.0.0.1:%d, waiting for attach" % mouse.server.port)
         self.assertEqual(driver.calls, [])
         self.assertEqual(mouse.attach_command_text(), "")
         mouse.close()
         self.assertEqual(mouse.state, usbip_mouse.STOPPED)
 
-    def test_denied_attach_is_never_elevated_silently(self) -> None:
+    def test_refused_attach_names_the_command_and_nothing_is_elevated(self) -> None:
         mouse, driver = self.make()
         driver.attach_error = "error: Access is denied."
         mouse.start()
@@ -355,26 +379,47 @@ class VirtualMouseTest(unittest.TestCase):
         self.assertEqual(mouse.problem, usbip_client.DENIED)
         self.assertIn("console as administrator", mouse.message)
         self.assertIn("attach -r 127.0.0.1 -b 1-1", mouse.message)
-        self.assertEqual(self.elevated, [])                 # nothing happened by itself
-        self.assertTrue(mouse.can_elevate())
-        # On request, and only then, the UAC prompt is used.
-        driver.attach_error = ""
-        self.assertTrue(mouse.attach_elevated())
-        self.assertEqual(len(self.elevated), 1)
-        self.assertEqual(self.elevated[0][0], TOOL)
-        driver(self.elevated[0], 1.0)                       # what Windows would then run
-        self.settle(mouse)
-        self.assertEqual(mouse.state, usbip_mouse.ATTACHED)
-        self.assertEqual(mouse.port, 3)
+        self.assertEqual(len([c for c in driver.commands() if "attach" in c]), 1)
+        source = "".join(open(module.__file__, encoding="utf-8").read()
+                         for module in (usbip_client, usbip_mouse))
+        for word in ("runas", "ShellExecute", "ctypes"):
+            self.assertNotIn(word, source)
+        self.assertIn("USBip app", mouse.message)
 
-    def test_elevation_is_not_offered_for_a_tool_in_a_user_folder(self) -> None:
-        mouse, driver = self.make(tool="C:\\Users\\someone\\Downloads\\usbip.exe")
-        driver.attach_error = "error: Access is denied."
+    def test_attach_made_outside_is_noticed_and_never_detached_by_us(self) -> None:
+        for tool in (None, TOOL):
+            mouse, driver = self.make(tool=tool)
+            driver.attach_error = "error: Access is denied."
+            mouse.start()
+            self.settle(mouse)
+            self.assertFalse(mouse.external)
+            before = len(driver.calls)
+            # The user attaches with the USBip app: the server sees the client.
+            outside = Client("127.0.0.1", mouse.server.port)
+            self.addCleanup(outside.close)
+            self.assertEqual(outside.import_device(), 0)
+            self.assertTrue(wait_until(lambda: mouse.poll() is not None
+                                       and mouse.state == usbip_mouse.ATTACHED
+                                       and mouse.problem == ""))
+            self.assertTrue(mouse.external)
+            self.assertEqual((mouse.port, mouse.ours), (0, False))
+            self.assertEqual(mouse.message, "Attached from outside QuadSens.")
+            mouse.stop(wait=True)
+            self.assertEqual(len(driver.calls), before, tool)      # usbip.exe was not run
+            self.assertFalse(mouse.running)
+            self.assertEqual(mouse.message, usbip_mouse.EXTERNAL_STOP)
+            self.assertIn("disappears on the Windows side", mouse.message)
+            self.assertEqual(outside.socket.recv(1), b"")          # the connection ended
+
+    def test_stop_without_any_attach_runs_nothing(self) -> None:
+        mouse, driver = self.make()
+        driver.attach_error = "error: something odd"
         mouse.start()
         self.settle(mouse)
-        self.assertFalse(mouse.can_elevate())
-        self.assertFalse(mouse.attach_elevated())
-        self.assertEqual(self.elevated, [])
+        before = len(driver.calls)
+        mouse.stop(wait=True)
+        self.assertEqual(len(driver.calls), before)
+        self.assertEqual(mouse.message, "Stopped.")
 
     def test_port_busy(self) -> None:
         blocker = socket.socket()

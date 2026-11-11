@@ -669,6 +669,28 @@ def enumerate_device(client: Client, interfaces: int = 1) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def format_event(entry: dict[str, Any]) -> str:
+    """One readable line for any entry the server, the device or the handler logs."""
+    stamp = time.strftime("%H:%M:%S", time.localtime(entry.get("t", time.time())))
+    event = entry.get("event")
+    if event == "usbip":
+        rest = " ".join("%s=%s" % (k, v) for k, v in entry.items()
+                        if k not in ("t", "event", "op"))
+        return "%s usbip   %-14s %s" % (stamp, entry.get("op"), rest)
+    if event == "control":
+        rest = " ".join("%s=%s" % (k, v) for k, v in entry.items()
+                        if k not in ("t", "event", "name", "status"))
+        return "%s control %-32s %-5s %s" % (stamp, entry.get("name"),
+                                             entry.get("status"), rest)
+    if event == "server":
+        return "%s server  %s" % (stamp, entry.get("message"))
+    if event == "client":
+        return "%s server  USB/IP client %s" % (stamp, entry.get("state"))
+    if event == "mouse":
+        return "%s mouse   %s" % (stamp, entry.get("message"))
+    return "%s hid     %s" % (stamp, emulator.format_entry(entry).split(" ", 1)[1])
+
+
 class ServerError(Exception):
     """The server could not be started; the message says why."""
 

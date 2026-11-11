@@ -1,16 +1,22 @@
 """The virtual mouse on Windows: USB/IP server plus the attach through usbip-win2 (no Qt).
 
 Starting means: serve the device on this PC, then ask usbip-win2 to attach
-it. Stopping means: detach our port, and only ours, then stop serving. The
-calls to usbip.exe can take a moment, so they run in a worker thread; the
-window asks poll() for what happened.
+it; one call, no further action by the user. Stopping means: detach the port
+this application attached, and only that, then stop serving. The calls to
+usbip.exe can take a moment, so they run in a worker thread; the window asks
+poll() for what happened.
+
+If the attach fails or usbip.exe is not found, the server keeps serving, and
+an attach made elsewhere (the USBip app) is noticed, because the server sees
+the client connect. Such an attach is not ours to undo: stopping then only
+ends the connection, and the device disappears on the Windows side.
 """
 
 from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from typing import Any
 
 from . import usbip_client
@@ -21,27 +27,29 @@ STOPPED, SERVING, ATTACHED, IN_USE, ERROR = (
     "stopped", "serving", "attached", "in use", "error")
 STATE_TEXT = {
     STOPPED: "Stopped",
-    SERVING: "Serving on this PC, not attached",
+    SERVING: "Serving on 127.0.0.1:%d, waiting for attach",
     ATTACHED: "Attached: Windows sees the device",
     IN_USE: "In use: a program is talking to the device",
     ERROR: "Stopped after an error",
 }
 
 
+EXTERNAL_STOP = ("Stopped serving. The device was attached outside QuadSens, so nothing "
+                 "was detached; it disappears on the Windows side now.")
+
+
 class VirtualMouse:
-    def __init__(self, client: UsbipClient, server: VirtualMouseServer | None = None,
-                 elevate: Callable[[list[str]], bool] = usbip_client.run_elevated,
-                 environ: Mapping[str, str] | None = None) -> None:
+    def __init__(self, client: UsbipClient,
+                 server: VirtualMouseServer | None = None) -> None:
         self.client = client
         self.server = server or VirtualMouseServer(port=client.tcp_port)
-        self._elevate = elevate
-        self._environ = environ
         self._lock = threading.Lock()
         self._worker: threading.Thread | None = None
         self._notes: list[dict[str, Any]] = []
         self.message = ""          # last thing worth telling the user
         self.problem = ""          # usbip_client kind of the last failed attach, or ""
         self.port = 0              # USB/IP hub port our device is attached to
+        self.ours = False          # this application attached it, so it detaches it
         self.traffic = False       # the device answered a command since it was attached
         self.started_at: float | None = None
         self.failed = False
@@ -65,21 +73,27 @@ class VirtualMouse:
             return IN_USE if self.traffic else ATTACHED
         return SERVING
 
-    def can_elevate(self) -> bool:
-        """Whether "Run as administrator" may be offered for the last refusal."""
-        return (self.problem == usbip_client.DENIED and self.running
-                and usbip_client.can_offer_elevation(self.client.tool, self._environ))
+    @property
+    def external(self) -> bool:
+        """Attached, but not by this application (for example with the USBip app)."""
+        return self.server.attached and not self.ours and not self.busy
+
+    def state_text(self) -> str:
+        text = STATE_TEXT[self.state]
+        return text % self.server.port if "%d" in text else text
 
     def attach_command_text(self) -> str:
         if not self.client.installed:
             return ""
         return usbip_client.command_line(self.client.attach_command())
 
-    def _note(self, message: str, problem: str = "") -> None:
+    def _note(self, message: str, problem: str = "", show: bool = False) -> None:
+        """Record what happened; ``show`` asks the window to display it although
+        nothing went wrong."""
         with self._lock:
             self.message, self.problem = message, problem
             self._notes.append({"event": "mouse", "message": message, "problem": problem,
-                                "t": round(time.time(), 3)})
+                                "show": show, "t": round(time.time(), 3)})
 
     # ---- start and stop ----------------------------------------------------------------
 
@@ -90,6 +104,7 @@ class VirtualMouse:
         self.failed = False
         self.traffic = False
         self.port = 0
+        self.ours = False
         try:
             self.server.start()
         except ServerError as exc:
@@ -109,7 +124,7 @@ class VirtualMouse:
     def _attach(self) -> None:
         outcome = self.client.attach()
         if outcome.ok:
-            self.port = outcome.port
+            self.port, self.ours = outcome.port, True
             self._note(outcome.message)
         else:
             self._note(outcome.message, outcome.kind)
@@ -119,33 +134,6 @@ class VirtualMouse:
         if self.running and not self.busy and not self.server.attached:
             self._run(self._attach)
 
-    def attach_elevated(self) -> bool:
-        """Run the attach through the Windows administrator prompt, if that is allowed.
-
-        Only for a usbip.exe in a protected system folder, and only on request.
-        """
-        if not self.can_elevate() or self.busy:
-            return False
-        if not self._elevate(self.client.attach_command()):
-            self._note("The administrator prompt was declined or could not be shown. "
-                       "Run this in a console opened as administrator: "
-                       + self.attach_command_text(), usbip_client.DENIED)
-            return False
-        self._note("Asked Windows to run the attach as administrator ...")
-
-        def wait() -> None:
-            for _ in range(20):
-                time.sleep(0.25)
-                if self.server.attached:
-                    self.port = self.client.our_port()
-                    self._note("Attached to USB/IP port %d." % self.port if self.port
-                               else "Attached.")
-                    return
-            self._note("The device did not get attached. Run this in a console opened as "
-                       "administrator: " + self.attach_command_text(), usbip_client.DENIED)
-        self._run(wait)
-        return True
-
     def stop(self, wait: bool = False) -> None:
         """Detach our port and stop serving. With ``wait`` it returns when that is done."""
         if not self.running and not self.busy:
@@ -153,16 +141,25 @@ class VirtualMouse:
         worker = self._worker
 
         def work() -> None:
+            show = False
             if worker is not None and worker.is_alive():
                 worker.join(5)
-            outcome = self.client.detach(self.port)
+            if self.ours:
+                # Ours: detach that port, and nothing else.
+                outcome = self.client.detach(self.port)
+                text = "Stopped." if outcome.ok or not outcome.message \
+                    else "Stopped. " + outcome.message
+                problem = "" if outcome.ok else outcome.kind
+            elif self.server.attached:
+                # Attached elsewhere: not ours to detach. Ending the connection
+                # makes the device disappear on the Windows side.
+                text, problem, show = EXTERNAL_STOP, "", True
+            else:
+                text, problem = "Stopped.", ""
             self.server.stop()
-            self.port = 0
+            self.port, self.ours = 0, False
             self.traffic = False
-            self._note("Stopped." if outcome.ok or not outcome.message
-                       else "Stopped. " + outcome.message,
-                       "" if outcome.ok or outcome.kind == usbip_client.NOT_INSTALLED
-                       else outcome.kind)
+            self._note(text, problem, show)
         self._worker = threading.Thread(target=work, name="usbip-client", daemon=True)
         self._worker.start()
         if wait:
@@ -181,6 +178,8 @@ class VirtualMouse:
             if entry.get("event") == "client":
                 if entry.get("state") == "detached":
                     self.traffic = False
+                elif not self.ours and not self.busy:
+                    self._note("Attached from outside QuadSens.")
             elif "cmd" in entry and self.server.attached:
                 self.traffic = True
         with self._lock:
