@@ -1,12 +1,21 @@
-"""The application's look: Fusion plus one stylesheet generated from the palette.
+"""The application's look: Fusion plus one stylesheet generated from a colour set.
 
-The colours come from quadsens.colors.derive_theme(), fed with five colours of
-the system palette, so the look follows light and dark schemes and the
-desktop's accent colour. The stylesheet is generated again whenever the
-palette changes. Nothing here animates.
+There are three themes (View > Theme, remembered):
 
-Escape hatch: with QUADSENS_NATIVE_STYLE=1 in the environment, or "Use system
-style" in the View menu, neither Fusion nor the stylesheet is applied.
+    quadsens  the built-in black and red colour set; the default. It does not
+              change when the desktop switches between light and dark.
+    system    the same look, with colours derived from the system palette, so
+              it follows light and dark schemes and the desktop's accent.
+    native    no custom styling at all: the desktop's own style and palette.
+
+All colours come from quadsens.colors.derive_theme(), fed either with the
+built-in base colours or with five colours of the system palette. For the
+built-in theme a matching QPalette is set on the application as well, so that
+everything the stylesheet does not reach (menus, tooltips, dialogs, check-box
+indicators) matches. Nothing here animates.
+
+Environment: QUADSENS_THEME=quadsens|system|native overrides the stored
+choice; QUADSENS_NATIVE_STYLE=1 is the older spelling of "native".
 """
 
 from __future__ import annotations
@@ -17,10 +26,19 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from ..colors import Theme, derive_theme
+from ..colors import Theme, derive_theme, mix, quadsens_theme
 from .qt import QtCore, QtGui, QtWidgets
 
 ENV_NATIVE = "QUADSENS_NATIVE_STYLE"
+ENV_THEME = "QUADSENS_THEME"
+QUADSENS, SYSTEM, NATIVE = "quadsens", "system", "native"
+MODES: tuple[str, ...] = (QUADSENS, SYSTEM, NATIVE)
+MODE_TITLES = {
+    QUADSENS: "&QuadSens (black and red)",
+    SYSTEM: "&Follow system colours",
+    NATIVE: "&System style",
+}
+DEFAULT_MODE = QUADSENS
 RADIUS = 6          # controls
 CARD_RADIUS = 8
 CONTROL_HEIGHT = 28  # smallest height of anything that can be clicked
@@ -30,10 +48,33 @@ _CHEVRON = (
     '<path d="{path}" fill="none" stroke="{color}" stroke-width="1.8" '
     'stroke-linecap="round" stroke-linejoin="round"/></svg>')
 _PATHS = {"down": "M2.5 4.5 L6 8 L9.5 4.5", "up": "M2.5 7.5 L6 4 L9.5 7.5"}
+_CHECK_PATH = "M2.6 6.3 L5 8.6 L9.5 3.6"
 
 
 def env_forces_native() -> bool:
     return os.environ.get(ENV_NATIVE, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def env_mode() -> str | None:
+    """The theme the environment asks for, None if it does not say."""
+    wanted = os.environ.get(ENV_THEME, "").strip().lower()
+    if wanted in MODES:
+        return wanted
+    return NATIVE if env_forces_native() else None
+
+
+def stored_mode(settings: QtCore.QSettings) -> str:
+    """The remembered theme; an old "use system style" switch becomes "native"."""
+    stored = settings.value("ui/theme")
+    if isinstance(stored, str) and stored in MODES:
+        return stored
+    if settings.contains("ui/native_style"):
+        native = bool(settings.value("ui/native_style", False, type=bool))
+        settings.remove("ui/native_style")
+        if native:
+            settings.setValue("ui/theme", NATIVE)
+            return NATIVE
+    return DEFAULT_MODE
 
 
 def theme_from_palette(palette: QtGui.QPalette) -> Theme:
@@ -44,12 +85,40 @@ def theme_from_palette(palette: QtGui.QPalette) -> Theme:
         palette.color(role.HighlightedText).name())
 
 
+def palette_for(theme: Theme) -> QtGui.QPalette:
+    """A complete QPalette that matches a colour set, for what the stylesheet misses."""
+    role, group = QtGui.QPalette.ColorRole, QtGui.QPalette.ColorGroup
+    palette = QtGui.QPalette()
+    colours = {
+        role.Window: theme.window, role.WindowText: theme.text,
+        role.Base: theme.base, role.AlternateBase: theme.surface,
+        role.Text: theme.text, role.Button: theme.control, role.ButtonText: theme.text,
+        role.BrightText: theme.on_accent, role.ToolTipBase: theme.control,
+        role.ToolTipText: theme.text, role.PlaceholderText: theme.muted,
+        role.Highlight: theme.accent, role.HighlightedText: theme.on_accent,
+        role.Link: theme.accent_line, role.LinkVisited: theme.accent_line,
+        role.Light: theme.control_pressed, role.Midlight: theme.control_hover,
+        role.Mid: theme.outline, role.Dark: mix(theme.window, theme.text, 0.02),
+        role.Shadow: theme.window,
+    }
+    for name, value in colours.items():
+        palette.setColor(name, QtGui.QColor(value))
+    for name in (role.WindowText, role.Text, role.ButtonText, role.PlaceholderText):
+        palette.setColor(group.Disabled, name, QtGui.QColor(theme.disabled))
+    palette.setColor(group.Disabled, role.Highlight, QtGui.QColor(theme.control_pressed))
+    palette.setColor(group.Disabled, role.HighlightedText, QtGui.QColor(theme.disabled))
+    return palette
+
+
 _cache: tuple[int, Theme] | None = None
+_fixed: Theme | None = None   # set while the built-in theme is active
 
 
 def current_theme() -> Theme:
-    """The colour set for the application palette as it is right now."""
+    """The colour set in use: the built-in one, or the one of the palette as it is now."""
     global _cache
+    if _fixed is not None:
+        return _fixed
     palette = QtWidgets.QApplication.palette()
     key = int(palette.cacheKey())
     if _cache is None or _cache[0] != key:
@@ -78,6 +147,7 @@ _TEMPLATE = """
 QLabel, QCheckBox, QToolButton { color: %(text)s; }
 QLabel:disabled, QCheckBox:disabled, QToolButton:disabled { color: %(disabled)s; }
 QLabel[role="caption"] { color: %(muted)s; }
+QToolTip { background: %(control)s; color: %(text)s; border: 1px solid %(outline)s; }
 
 /* ---- cards ----------------------------------------------------------- */
 QFrame#card {
@@ -207,13 +277,33 @@ QAbstractSpinBox::down-arrow:disabled, QAbstractSpinBox::down-arrow:off {
 QCheckBox { spacing: 6px; padding: 2px; min-height: %(inner)dpx;
     border: 2px solid transparent; border-radius: %(radius)dpx; }
 QCheckBox:focus { border: 2px solid %(focus)s; }
+QCheckBox::indicator {
+    width: 14px;
+    height: 14px;
+    background: %(base)s;
+    border: 1px solid %(outline)s;
+    border-radius: 4px;
+}
+QCheckBox::indicator:hover { background: %(control_hover)s; }
+QCheckBox::indicator:checked {
+    background: %(accent)s;
+    border: 1px solid %(accent)s;
+    image: url(%(check)s);
+}
+QCheckBox::indicator:disabled { background: %(surface)s; border: 1px solid %(border)s; }
+QCheckBox::indicator:checked:disabled {
+    background: %(control)s;
+    border: 1px solid %(border)s;
+    image: url(%(check_off)s);
+}
 
 /* ---- banners ------------------------------------------------------------ */
 QFrame[banner] { border: 1px solid transparent; border-radius: %(radius)dpx; }
 QFrame[banner="info"] { background: %(info_bg)s; border: 1px solid %(info_mark)s; }
 QFrame[banner="success"] { background: %(success_bg)s; border: 1px solid %(success_mark)s; }
 QFrame[banner="warning"] { background: %(warning_bg)s; border: 1px solid %(warning_mark)s; }
-QFrame[banner="error"] { background: %(error_bg)s; border: 1px solid %(error_mark)s; }
+/* An error gets the heaviest frame: it must stand out without a colour of its own. */
+QFrame[banner="error"] { background: %(error_bg)s; border: 2px solid %(error_mark)s; }
 QFrame[banner="info"] QLabel#bannerMark { color: %(info_mark)s; }
 QFrame[banner="success"] QLabel#bannerMark { color: %(success_mark)s; }
 QFrame[banner="warning"] QLabel#bannerMark { color: %(warning_mark)s; }
@@ -233,7 +323,7 @@ QAbstractScrollArea::corner { background: transparent; }
 
 
 class ThemeManager(QtCore.QObject):
-    """Applies the look to the application and keeps it in step with the palette."""
+    """Applies a theme to the application and keeps it in step with the palette."""
 
     _instance: ThemeManager | None = None
 
@@ -250,7 +340,8 @@ class ThemeManager(QtCore.QObject):
         self._app = app
         self._system_style = app.style().objectName() or "Fusion"
         self._style = self._system_style
-        self._native = env_forces_native()
+        self._mode = env_mode() or DEFAULT_MODE
+        self._own_palette = False   # the application palette is ours, not the system's
         self._applying = False
         self._applied: str | None = None
         self._icon_dir = Path(tempfile.mkdtemp(prefix="quadsens-style-"))
@@ -262,15 +353,20 @@ class ThemeManager(QtCore.QObject):
 
     # ---- state --------------------------------------------------------------
 
-    def is_native(self) -> bool:
-        """True when the custom look is switched off."""
-        return self._native
+    def mode(self) -> str:
+        """quadsens, system or native."""
+        return self._mode
 
-    def set_native(self, native: bool) -> None:
-        native = bool(native) or env_forces_native()
-        if native != self._native:
-            self._native = native
-            self.apply()
+    def set_mode(self, mode: str) -> None:
+        """Switch the theme now. The environment, if it names a theme, wins."""
+        mode = env_mode() or (mode if mode in MODES else DEFAULT_MODE)
+        if mode != self._mode:
+            self._mode = mode
+        self.apply()
+
+    def is_native(self) -> bool:
+        """True when no custom styling is applied."""
+        return self._mode == NATIVE
 
     def theme(self) -> Theme:
         return current_theme()
@@ -287,24 +383,42 @@ class ThemeManager(QtCore.QObject):
                     target.write_text(_CHEVRON.format(path=path, color=colour),
                                       encoding="ascii")
                 icons[f"chevron_{name}{suffix}"] = target.as_posix()
+        for key, colour in (("check", theme.on_accent), ("check_off", theme.disabled)):
+            target = self._icon_dir / f"check-{colour.lstrip('#')}.svg"
+            if not target.exists():
+                target.write_text(_CHEVRON.format(path=_CHECK_PATH, color=colour),
+                                  encoding="ascii")
+            icons[key] = target.as_posix()
         return icons
 
     def apply(self) -> None:
-        """Set style and stylesheet for the current palette (or remove them)."""
+        """Set style, palette and stylesheet for the current theme."""
+        global _fixed
         if self._applying:
             return
         self._applying = True
         try:
-            if self._native:
-                wanted = ""
-                style = self._system_style
-            else:
-                theme = current_theme()
-                wanted = stylesheet(theme, self._icons(theme))
-                style = "Fusion"
+            style = self._system_style if self._mode == NATIVE else "Fusion"
             if self._style.lower() != style.lower():
                 self._style = style
                 self._app.setStyle(style)
+            if self._mode == QUADSENS:
+                _fixed = quadsens_theme()
+                palette = palette_for(_fixed)
+                if not self._own_palette or self._app.palette() != palette:
+                    self._own_palette = True
+                    self._app.setPalette(palette)
+            else:
+                _fixed = None
+                if self._own_palette:
+                    # A default palette hands the colours back to the system.
+                    self._own_palette = False
+                    self._app.setPalette(QtGui.QPalette())
+            if self._mode == NATIVE:
+                wanted = ""
+            else:
+                theme = current_theme()
+                wanted = stylesheet(theme, self._icons(theme))
             if wanted != self._applied:
                 self._applied = wanted
                 self._app.setStyleSheet(wanted)

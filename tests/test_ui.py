@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - depends on the environment
     raise unittest.SkipTest("no Qt binding (PySide6) installed") from None
 
 import quadsens
-from quadsens import about, emulator, hints
+from quadsens import about, colors, emulator, hints
 from quadsens.driver import PARAM_NAMES, Driver
 from quadsens.model import Scalars
 from quadsens.persist import Saver, SaveState
@@ -34,7 +34,13 @@ from quadsens.ui.main_window import MainWindow, about_html
 from quadsens.ui.mouse_panel import WRITE_PREFIX, write_line_colors
 from quadsens.ui.scale_spin import ScaleSpinBox
 from quadsens.ui.status import StatusDot
-from quadsens.ui.theme import CONTROL_HEIGHT, ThemeManager, current_theme, env_forces_native
+from quadsens.ui.theme import (
+    CONTROL_HEIGHT,
+    ThemeManager,
+    current_theme,
+    env_mode,
+    stored_mode,
+)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "ASFSettings.json"
 FAKE_TOOL = Path(__file__).parent / "fake_yeetmousectl.py"
@@ -276,6 +282,7 @@ class MainWindowTest(unittest.TestCase):
         self.assertFalse(window.windowIcon().pixmap(32, 32).isNull())
         titles = [action.text() for action in window.menuBar().actions()]
         self.assertEqual(titles, ["&File", "View", "&Help"])
+        self.assertEqual(ThemeManager.instance().mode(), "quadsens")
         self.assertEqual(window.open_folder_action.shortcut().toString(), "Ctrl+O")
         self.assertEqual(window.quit_action.shortcut().toString(), "Ctrl+Q")
         self.assertEqual(window.steps_action.shortcut().toString(), "F1")
@@ -988,14 +995,71 @@ class MainWindowTest(unittest.TestCase):
             palette.setColor(name, QtGui.QColor(color))
         return palette
 
-    def test_stylesheet_is_generated_from_the_palette(self) -> None:
-        self.make_window()
+    def use_theme(self, mode: str) -> ThemeManager:
+        """Switch the theme for this test; the default comes back afterwards."""
         manager = ThemeManager.instance()
-        self.assertFalse(manager.is_native())
+        self.addCleanup(manager.set_mode, "quadsens")
+        manager.set_mode(mode)
+        return manager
+
+    def window_colour(self) -> str:
+        return _app.palette().color(QtGui.QPalette.ColorRole.Window).name()
+
+    def test_black_and_red_is_the_default(self) -> None:
+        window = self.make_window()
+        manager = ThemeManager.instance()
+        self.assertEqual(manager.mode(), "quadsens")
+        theme = current_theme()
+        self.assertEqual(theme, colors.quadsens_theme())
+        self.assertEqual((theme.window, theme.accent), ("#0b0b0d", "#d7263d"))
+        self.assertEqual(theme.failures(), [])
+        sheet = _app.styleSheet()
+        for value in (theme.surface, theme.accent, theme.accent_line, theme.outline):
+            self.assertIn(value, sheet)
+        # The palette matches, so that menus, dialogs and tooltips are dark as well.
+        role = QtGui.QPalette.ColorRole
+        palette = _app.palette()
+        self.assertEqual(palette.color(role.Window).name(), "#0b0b0d")
+        self.assertEqual(palette.color(role.WindowText).name(), theme.text)
+        self.assertEqual(palette.color(role.Base).name(), theme.base)
+        self.assertEqual(palette.color(role.Highlight).name(), "#d7263d")
+        self.assertEqual(palette.color(role.HighlightedText).name(), "#ffffff")
+        self.assertEqual(palette.color(role.ToolTipText).name(), theme.text)
+        self.assertEqual(palette.color(role.Link).name(), theme.accent_line)
+        disabled = palette.color(QtGui.QPalette.ColorGroup.Disabled, role.Text).name()
+        self.assertEqual(disabled, theme.disabled)
+        for pair in ((role.WindowText, role.Window), (role.Text, role.Base),
+                     (role.ButtonText, role.Button), (role.ToolTipText, role.ToolTipBase),
+                     (role.HighlightedText, role.Highlight), (role.Link, role.Window)):
+            ratio = colors.contrast(palette.color(pair[0]).name(), palette.color(pair[1]).name())
+            self.assertGreaterEqual(ratio, 4.5, pair)
+        window.about_action.trigger()   # dialogs take the palette
+        box = window.info_box
+        assert box is not None
+        self.assertEqual(box.palette().color(role.Window).name(), "#0b0b0d")
+        box.close()
+
+    def test_black_and_red_ignores_the_desktop_scheme(self) -> None:
+        self.make_window()
+        before = _app.styleSheet()
+        light = QtGui.QPalette()
+        light.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor("#efefef"))
+        light.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor("#202020"))
+        _app.setPalette(light)   # the desktop switches to a light scheme
+        for _ in range(5):
+            _app.processEvents()
+        self.assertEqual(self.window_colour(), "#0b0b0d")
+        self.assertEqual(_app.styleSheet(), before)
+        self.assertEqual(current_theme().window, "#0b0b0d")
+
+    def test_follow_system_colours_generates_from_the_palette(self) -> None:
+        self.make_window()
+        manager = self.use_theme("system")
+        self.assertEqual(manager.mode(), "system")
         sheet = _app.styleSheet()
         theme = current_theme()
-        self.assertEqual(theme.window,
-                         _app.palette().color(QtGui.QPalette.ColorRole.Window).name())
+        self.assertNotEqual(theme.window, "#0b0b0d")
+        self.assertEqual(theme.window, self.window_colour())
         for value in (theme.surface, theme.accent, theme.outline, theme.focus,
                       theme.warning_bg):
             self.assertIn(value, sheet)
@@ -1004,11 +1068,11 @@ class MainWindowTest(unittest.TestCase):
         self.assertNotIn("transition", sheet)  # nothing animates
         self.assertNotIn("animation", sheet)
 
-    def test_look_follows_a_palette_change(self) -> None:
+    def test_follow_system_colours_tracks_a_palette_change(self) -> None:
         self.make_window()
+        self.use_theme("system")
         before = _app.styleSheet()
-        original = QtGui.QPalette(_app.palette())
-        self.addCleanup(lambda: (_app.setPalette(original), ThemeManager.instance().apply()))
+        self.addCleanup(_app.setPalette, QtGui.QPalette())
         _app.setPalette(self.dark_palette())
         for _ in range(5):
             _app.processEvents()
@@ -1082,40 +1146,86 @@ class MainWindowTest(unittest.TestCase):
         self.assertEqual(primaries(), ["Save to config"])
         self.assertFalse(drv.read_button.property("primary"))
 
-    def test_system_style_switch_is_remembered(self) -> None:
+    def test_theme_menu_switches_at_once_and_is_remembered(self) -> None:
         window = self.make_window()
         manager = ThemeManager.instance()
-        self.addCleanup(manager.set_native, False)
-        self.assertEqual(window.native_action.text(), "Use &system style")
-        self.assertTrue(window.native_action.isCheckable())
-        self.assertFalse(window.native_action.isChecked())
+        self.addCleanup(manager.set_mode, "quadsens")
+        actions = window.theme_actions
+        self.assertEqual(list(actions), ["quadsens", "system", "native"])
+        self.assertEqual([action.text() for action in actions.values()],
+                         ["&QuadSens (black and red)", "&Follow system colours",
+                          "&System style"])
+        self.assertEqual(window.theme_menu.title(), "&Theme")
+        self.assertTrue(window.theme_group.isExclusive())
+        self.assertEqual([a.isChecked() for a in actions.values()], [True, False, False])
+        black_sheet = _app.styleSheet()
+
+        actions["system"].trigger()
+        self.assertEqual(manager.mode(), "system")
+        self.assertEqual([a.isChecked() for a in actions.values()], [False, True, False])
+        self.assertNotEqual(self.window_colour(), "#0b0b0d")   # the system's colours again
+        self.assertNotEqual(_app.styleSheet(), black_sheet)
         self.assertTrue(_app.styleSheet())
-        window.native_action.trigger()
+        window.close()
+        again = self.make_window()   # remembered
+        self.assertEqual(manager.mode(), "system")
+        self.assertTrue(again.theme_actions["system"].isChecked())
+
+        again.theme_actions["native"].trigger()
         self.assertTrue(manager.is_native())
         self.assertEqual(_app.styleSheet(), "")
-        window.close()
-        again = self.make_window()
-        self.assertTrue(again.native_action.isChecked())
-        self.assertEqual(_app.styleSheet(), "")
+        self.assertNotEqual(self.window_colour(), "#0b0b0d")
         hint = again.minimumSizeHint()  # the plain style fits as well
         self.assertLessEqual((hint.width(), hint.height()), (720, 520))
-        again.native_action.trigger()
-        self.assertFalse(manager.is_native())
-        self.assertTrue(_app.styleSheet())
 
-    def test_environment_variable_switches_the_look_off(self) -> None:
+        again.theme_actions["quadsens"].trigger()
+        self.assertEqual(manager.mode(), "quadsens")
+        self.assertEqual(_app.styleSheet(), black_sheet)
+        self.assertEqual(self.window_colour(), "#0b0b0d")
+        settings = QtCore.QSettings(str(self.tmp / "settings.ini"),
+                                    QtCore.QSettings.Format.IniFormat)
+        self.assertEqual(settings.value("ui/theme"), "quadsens")
+
+    def test_old_system_style_setting_is_migrated(self) -> None:
+        path = str(self.tmp / "old.ini")
+        settings = QtCore.QSettings(path, QtCore.QSettings.Format.IniFormat)
+        self.assertEqual(stored_mode(settings), "quadsens")        # nothing stored
+        settings.setValue("ui/native_style", True)
+        self.assertEqual(stored_mode(settings), "native")
+        self.assertFalse(settings.contains("ui/native_style"))
+        self.assertEqual(settings.value("ui/theme"), "native")
+        settings.setValue("ui/theme", "nonsense")
+        self.assertEqual(stored_mode(settings), "quadsens")
+        other = QtCore.QSettings(str(self.tmp / "off.ini"), QtCore.QSettings.Format.IniFormat)
+        other.setValue("ui/native_style", False)                    # the switch was off
+        self.assertEqual(stored_mode(other), "quadsens")
+        self.assertFalse(other.contains("ui/native_style"))
+
+    def test_environment_overrides_the_theme(self) -> None:
         manager = ThemeManager.instance()
-        self.addCleanup(manager.set_native, False)
+        self.addCleanup(manager.set_mode, "quadsens")
         with mock.patch.dict(os.environ, {"QUADSENS_NATIVE_STYLE": "1"}):
-            self.assertTrue(env_forces_native())
+            self.assertEqual(env_mode(), "native")
             window = self.make_window()
             self.assertTrue(manager.is_native())
             self.assertEqual(_app.styleSheet(), "")
-            self.assertTrue(window.native_action.isChecked())
-            self.assertFalse(window.native_action.isEnabled())
-        self.assertFalse(env_forces_native())
-        with mock.patch.dict(os.environ, {"QUADSENS_NATIVE_STYLE": "0"}):
-            self.assertFalse(env_forces_native())
+            self.assertTrue(window.theme_actions["native"].isChecked())
+            self.assertFalse(any(a.isEnabled() for a in window.theme_actions.values()))
+            with mock.patch.dict(os.environ, {"QUADSENS_THEME": "quadsens"}):
+                self.assertEqual(env_mode(), "quadsens")            # the newer name wins
+        with mock.patch.dict(os.environ, {"QUADSENS_THEME": "System"}):
+            self.assertEqual(env_mode(), "system")
+            window = self.make_window()
+            self.assertEqual(manager.mode(), "system")
+            self.assertTrue(window.theme_actions["system"].isChecked())
+        for value in ("", "0", "purple"):
+            with mock.patch.dict(os.environ, {"QUADSENS_THEME": value,
+                                              "QUADSENS_NATIVE_STYLE": "0"}):
+                self.assertIsNone(env_mode(), value)
+        self.assertIsNone(env_mode())
+        window = self.make_window()   # without the variable the stored choice counts
+        self.assertEqual(manager.mode(), "quadsens")
+        self.assertTrue(all(a.isEnabled() for a in window.theme_actions.values()))
 
     def test_banners_carry_a_mark_for_their_kind(self) -> None:
         window = self.make_window()

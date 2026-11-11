@@ -12,8 +12,9 @@ patched yeetmouse kernel module.
 ![QuadSens main window](docs/screenshot.png)
 
 The screenshot shows fixture data, after *Use result* and *Apply*, with
-*Save to config* as the next step. A dark-theme rendering is in
-[docs/screenshot-dark.png](docs/screenshot-dark.png).
+*Save to config* as the next step, in the default black and red theme. The
+same window with colours taken from a light desktop is in
+[docs/screenshot-system-light.png](docs/screenshot-system-light.png).
 
 ## How it works
 
@@ -235,10 +236,7 @@ Less common controls:
   swapped on your setup. *Apply saved values on start* makes QuadSens write
   the last applied values again whenever it starts; it is not needed once the
   values are saved to the config.
-- *View > Use system style* switches the application's own look off and shows
-  the window in the plain style of the desktop; the choice is remembered.
-  Starting with `QUADSENS_NATIVE_STYLE=1` in the environment does the same
-  without touching the setting.
+- *View > Theme* chooses the look; see [Appearance](#appearance).
 - *File > Open result folder* (Ctrl+O) opens the folder of the result file.
   *Help > First steps* (F1) shows the steps, and *Help > Setup help* lists
   what is not set up yet together with the commands to fix it.
@@ -331,13 +329,26 @@ directional values. Install the fork's tools and save again.
 
 ## Appearance
 
-QuadSens uses Qt's Fusion style with a stylesheet that is generated from the
-desktop palette when it starts and again whenever the palette changes, so it
-follows light and dark colour schemes and the desktop's accent colour. Text
-and the outlines of controls are kept at WCAG 2.1 AA contrast; if a palette
-does not provide that, the colours are strengthened. There are no animations.
-If the look does not suit your desktop, switch it off with *View > Use system
-style* or `QUADSENS_NATIVE_STYLE=1`.
+*View > Theme* offers three looks. The choice applies at once and is
+remembered.
+
+- **QuadSens (black and red)**, the default: a near-black window with red as
+  the accent. It stays the same whether the desktop is light or dark.
+- **Follow system colours**: the same look with colours taken from the desktop
+  palette, so it follows light and dark schemes and the desktop's accent
+  colour, also while QuadSens is running.
+- **System style**: no styling by QuadSens at all; the window uses the style
+  and colours of the desktop.
+
+The environment variable `QUADSENS_THEME=quadsens|system|native` overrides the
+stored choice for one start. `QUADSENS_NATIVE_STYLE=1` is an older way to ask
+for the system style.
+
+In the first two themes text is kept at WCAG 2.1 AA contrast and the outlines
+of controls and the focus ring at 3:1; colours that do not reach that are
+strengthened. Because red is the accent in the default theme, red does not
+mean "error" there: messages carry a mark and a word for their kind, and an
+error has a neutral background with a heavy frame. There are no animations.
 
 ## Development
 
@@ -354,13 +365,16 @@ screenshots from fixture data:
 
 ```sh
 python3 tools/make_screenshot.py
-python3 tools/make_screenshot.py --dark
+python3 tools/make_screenshot.py --theme system
 python3 tools/make_screenshot.py --sheet /tmp/quadsens-sheet.png
 ```
 
-The last command renders a contact sheet of the controls in their normal,
-hover, pressed, focused and disabled states, in light and dark, for checking
-changes to the look by eye.
+The first two write `docs/screenshot.png` and
+`docs/screenshot-system-light.png`. The last one renders a contact sheet of
+the controls in their normal, hover, pressed, focused and disabled states in
+every theme, for checking changes to the look by eye. `--diagrams DIRECTORY`
+and `--gallery DIRECTORY` render the direction diagram and a problem state,
+the About dialog and the Theme menu in the same way.
 
 Layout:
 

@@ -1,23 +1,33 @@
 #!/usr/bin/env python3
 """Offscreen smoke test: build the main window against fixtures and save a screenshot.
 
-Usage: python3 tools/make_screenshot.py [--dark] [OUTPUT.png] [WIDTHxHEIGHT]
+Usage: python3 tools/make_screenshot.py [--theme quadsens|system] [--dark]
+                                        [OUTPUT.png] [WIDTHxHEIGHT]
        python3 tools/make_screenshot.py --sheet OUTPUT.png
-       python3 tools/make_screenshot.py [--dark] --diagrams DIRECTORY
+       python3 tools/make_screenshot.py [--theme ...] [--dark] --diagrams DIRECTORY
+       python3 tools/make_screenshot.py [--theme ...] [--dark] --gallery DIRECTORY
 
-Uses a temp directory in place of sysfs and of the config file, a copy of the
-fixture calibration file and a stand-in for yeetmousectl. It does not create
-the uhid device, run pkexec or touch /sys or /etc. The picture shows the
-window after Use result and Apply, with Save to config as the next step. The window
-shows fixture data only; the one path it displays is below a neutral temp
-directory. --dark renders with a dark palette instead of the default one.
+Uses a temp directory in place of sysfs and of the config file, a made-up
+calibration file and a stand-in for yeetmousectl. It does not create the uhid
+device, run pkexec or touch /sys or /etc. The window shows fixture data only;
+the one path it displays is below a neutral temp directory. The picture shows
+the window after Use result and Apply, with Save to config as the next step.
+
+--theme chooses the built-in black and red theme (default) or the one that
+follows the system colours; --dark gives the latter a dark palette. Without
+OUTPUT the picture goes to docs/screenshot.png (black and red) or
+docs/screenshot-system-light.png.
 
 --sheet renders a contact sheet for checking the look by eye: the controls in
 their normal, hover, pressed, focused and disabled states, the banner kinds
-and the stepper, once with the light and once with the dark palette.
+and the stepper, once per theme (black and red, system light, system dark).
 
 --diagrams renders the direction diagram alone for three sets of multipliers
 (a real result, all 1.0, strongly lopsided) into DIRECTORY.
+
+--gallery renders what the main screenshot does not show into DIRECTORY: a
+problem state with warning and error banners, the About dialog and the open
+Theme menu.
 
 The calibration data is made up but consistent: the four multipliers are the
 1-2-1 weighted averages of the eight measured values, a few percent around 1.
@@ -208,9 +218,12 @@ def contact_sheet(output: Path) -> None:
     ]
 
     halves: list[QtGui.QImage] = []
-    for palette in (app.style().standardPalette(), dark_palette()):
-        app.setPalette(palette)
-        manager.apply()
+    for mode, palette in (("quadsens", None), ("system", QtGui.QPalette()),
+                          ("system", dark_palette())):
+        manager.set_mode(mode)
+        if palette is not None:
+            app.setPalette(palette)
+            manager.apply()
         theme = manager.theme()
         rendered = [(title, [_sample(make, st) for make, st in samples])
                     for title, samples in rows]
@@ -275,19 +288,88 @@ def diagram_renders(directory: Path, size: tuple[int, int] = (360, 300)) -> None
         print("diagram %s: %s" % (name, target))
 
 
+def gallery(directory: Path, mode: str) -> None:
+    """A problem state, the About dialog and the Theme menu, as PNG files."""
+    app = QtWidgets.QApplication.instance()
+    directory.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="quadsens-demo-") as tmp:
+        settings = QtCore.QSettings(str(Path(tmp, "settings.ini")),
+                                    QtCore.QSettings.Format.IniFormat)
+        settings.setValue("ui/theme", mode)
+        empty = Path(tmp, "no-tools")
+        empty.mkdir()
+        config = Path(tmp, "yeetmouse.conf")
+        config.write_text("sens=1\n", encoding="ascii")
+        # Nothing is set up: no uhid node, module not loaded, no result, no save tool.
+        window = MainWindow(settings, str(Path(tmp, "Users", "*", "x.json")),
+                            Driver(Path(tmp, "missing")), None,
+                            uhid_path=str(Path(tmp, "no-uhid")),
+                            saver=Saver(config, trusted_dirs=(str(empty),)))
+        window.resize(760, 560)
+        window.show()
+        window.driver_panel.apply_button.click()        # an error banner
+        window.driver_panel.read_button.setFocus()      # focus ring on a secondary button
+        for _ in range(5):
+            app.processEvents()
+        window.grab().save(str(directory / "problems.png"))
+        window.about_action.trigger()
+        for _ in range(5):
+            app.processEvents()
+        window.info_box.grab().save(str(directory / "about.png"))
+        window.info_box.close()
+        window.setup_action.trigger()
+        for _ in range(5):
+            app.processEvents()
+        window.info_box.grab().save(str(directory / "setup-help.png"))
+        window.info_box.close()
+        menu = window.theme_menu
+        menu.setActiveAction(window.theme_actions["system"])
+        menu.ensurePolished()
+        menu.resize(menu.sizeHint())
+        menu.grab().save(str(directory / "menu.png"))
+        window.close()
+    print("gallery in %s (%s)" % (directory, mode))
+
+
+def _options(argv: list[str]) -> tuple[list[str], str, bool]:
+    """Strip --theme and --dark from the arguments."""
+    rest: list[str] = []
+    mode, dark = "quadsens", False
+    skip = False
+    for index, arg in enumerate(argv):
+        if skip:
+            skip = False
+        elif arg == "--dark":
+            mode, dark = "system", True
+        elif arg == "--theme" and index + 1 < len(argv):
+            mode, skip = argv[index + 1], True
+        else:
+            rest.append(arg)
+    if mode not in ("quadsens", "system"):
+        raise SystemExit("--theme must be quadsens or system")
+    return rest, mode, dark
+
+
 def main(argv: list[str]) -> int:
-    if "--diagrams" in argv:
-        dark = "--dark" in argv
-        rest = [arg for arg in argv if arg not in ("--diagrams", "--dark")]
-        if len(rest) < 2:
-            print("usage: make_screenshot.py [--dark] --diagrams DIRECTORY", file=sys.stderr)
-            return 2
-        app = QtWidgets.QApplication([rest[0]])
-        if dark:
-            app.setPalette(dark_palette())
-        ThemeManager.instance().apply()
-        diagram_renders(Path(rest[1]))
-        return 0
+    argv, mode, dark = _options(argv)
+    for flag, render in (("--diagrams", None), ("--gallery", None)):
+        if flag in argv:
+            rest = [arg for arg in argv if arg != flag]
+            if len(rest) < 2:
+                print("usage: make_screenshot.py %s DIRECTORY" % flag, file=sys.stderr)
+                return 2
+            QtCore.QLocale.setDefault(QtCore.QLocale.c())
+            app = QtWidgets.QApplication([rest[0]])
+            manager = ThemeManager.instance()
+            manager.set_mode(mode)
+            if dark:
+                app.setPalette(dark_palette())
+                manager.apply()
+            if flag == "--diagrams":
+                diagram_renders(Path(rest[1]))
+            else:
+                gallery(Path(rest[1]), mode)
+            return 0
     if "--sheet" in argv:
         argv = [arg for arg in argv if arg != "--sheet"]
         if len(argv) < 2:
@@ -298,9 +380,9 @@ def main(argv: list[str]) -> int:
         ThemeManager.instance().apply()
         contact_sheet(Path(argv[1]))
         return 0
-    dark = "--dark" in argv
-    argv = [arg for arg in argv if arg != "--dark"]
-    default_name = "screenshot-dark.png" if dark else "screenshot.png"
+    default_name = ("screenshot.png" if mode == "quadsens"
+                    else "screenshot-system-dark.png" if dark
+                    else "screenshot-system-light.png")
     output = Path(argv[1]) if len(argv) > 1 else ROOT / "docs" / default_name
     width, height = (int(n) for n in (argv[2] if len(argv) > 2 else "860x600").split("x"))
     QtCore.QLocale.setDefault(QtCore.QLocale.c())
@@ -324,6 +406,7 @@ def main(argv: list[str]) -> int:
         pattern = str(Path(tmp, "Users", "*", "ASFData", "*", "ASFSettings.json"))
         settings = QtCore.QSettings(str(Path(tmp, "settings.ini")),
                                     QtCore.QSettings.Format.IniFormat)
+        settings.setValue("ui/theme", mode)
 
         config = Path(tmp, "yeetmouse.conf")
         config.write_text("sens=1\n", encoding="ascii")

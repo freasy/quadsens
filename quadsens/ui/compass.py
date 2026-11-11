@@ -87,7 +87,7 @@ class DirectionDiagram(QtWidgets.QWidget):
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing)
         text_color, muted = theme.color("text"), theme.color("muted")
-        accent, ring = theme.color("accent"), theme.color("outline")
+        accent, ring = theme.color("accent_line"), theme.color("outline")
         flags = QtCore.Qt.AlignmentFlag
 
         # Typographic hierarchy: the value carries the weight, the rest are captions.
@@ -174,8 +174,8 @@ class DirectionDiagram(QtWidgets.QWidget):
             else:
                 path.lineTo(at(x, y))
         path.closeSubpath()
-        fill = QtGui.QColor(accent)
-        fill.setAlphaF(0.16)
+        fill = theme.color("accent")
+        fill.setAlphaF(0.22)
         painter.setPen(QtGui.QPen(accent, 1.6))
         painter.setBrush(fill)
         painter.drawPath(path)

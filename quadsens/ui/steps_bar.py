@@ -59,6 +59,7 @@ class StepChip(QtWidgets.QWidget):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
         accent, on_accent = theme.color("accent"), theme.color("on_accent")
+        line = theme.color("accent_line")
         text, muted, outline = theme.color("text"), theme.color("muted"), theme.color("outline")
         circle = QtCore.QRectF(1, (self.height() - CIRCLE) / 2, CIRCLE, CIRCLE)
         font = self._title_font(True)
@@ -70,10 +71,10 @@ class StepChip(QtWidgets.QWidget):
             painter.setPen(on_accent)
             painter.drawText(circle, int(QtCore.Qt.AlignmentFlag.AlignCenter), str(info.number))
         elif info.status is Status.DONE:
-            painter.setPen(QtGui.QPen(accent, 1.6))
+            painter.setPen(QtGui.QPen(line, 1.6))
             painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
             painter.drawEllipse(circle.adjusted(0.8, 0.8, -0.8, -0.8))
-            pen = QtGui.QPen(accent, 2.0, QtCore.Qt.PenStyle.SolidLine,
+            pen = QtGui.QPen(line, 2.0, QtCore.Qt.PenStyle.SolidLine,
                              QtCore.Qt.PenCapStyle.RoundCap, QtCore.Qt.PenJoinStyle.RoundJoin)
             painter.setPen(pen)
             cx, cy = circle.center().x(), circle.center().y()
@@ -113,7 +114,7 @@ class StepLine(QtWidgets.QWidget):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
         if self.done:
-            pen = QtGui.QPen(theme.color("accent"), 2.0)
+            pen = QtGui.QPen(theme.color("accent_line"), 2.0)
         else:
             pen = QtGui.QPen(theme.color("outline"), 1.2, QtCore.Qt.PenStyle.DashLine)
         pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)

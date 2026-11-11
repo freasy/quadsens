@@ -34,7 +34,7 @@ from .mouse_panel import MousePanel
 from .qt import QtCore, QtGui, QtWidgets
 from .status import SPACE_L, SPACE_M
 from .steps_bar import StepsBar
-from .theme import ThemeManager, env_forces_native, set_primary
+from .theme import MODE_TITLES, MODES, ThemeManager, env_mode, set_primary, stored_mode
 
 DEFAULT_SIZE = (860, 600)
 
@@ -68,8 +68,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowIcon(app_icon())
         # The look is application-wide; the window only owns the switch for it.
         self.theme = ThemeManager.instance()
-        self.theme.set_native(bool(settings.value("ui/native_style", False, type=bool)))
-        self.theme.apply()
+        self.theme.set_mode(stored_mode(settings))
 
         def make_session(pid: int, on_log: Callable[[LogEntry], None]) -> EmulatorSession:
             return EmulatorSession(product_id=pid, state_path=emulator_state_path,
@@ -159,16 +158,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # No mnemonic: every letter of "View" belongs to a control of the window.
         view_menu = self.menuBar().addMenu("View")
-        self.native_action = QtGui.QAction("Use &system style", self)
-        self.native_action.setCheckable(True)
-        self.native_action.setChecked(self.theme.is_native())
-        self.native_action.setEnabled(not env_forces_native())
-        self.native_action.setToolTip(
-            "Show the window in the plain style of the desktop instead of the "
-            "application's own look")
-        self.native_action.toggled.connect(self.set_native_style)
-        view_menu.addAction(self.native_action)
-        view_menu.setToolTipsVisible(True)
+        theme_menu = view_menu.addMenu("&Theme")
+        self.theme_group = QtGui.QActionGroup(self)
+        self.theme_group.setExclusive(True)
+        self.theme_actions: dict[str, QtGui.QAction] = {}
+        for mode in MODES:
+            action = QtGui.QAction(MODE_TITLES[mode], self)
+            action.setCheckable(True)
+            action.setChecked(mode == self.theme.mode())
+            # A theme named in the environment cannot be changed from here.
+            action.setEnabled(env_mode() is None)
+            action.triggered.connect(lambda _checked=False, mode=mode: self.set_theme(mode))
+            self.theme_group.addAction(action)
+            theme_menu.addAction(action)
+            self.theme_actions[mode] = action
+        self.theme_menu = theme_menu
 
         help_menu = self.menuBar().addMenu("&Help")
         self.steps_action = QtGui.QAction("&First steps", self)
@@ -191,10 +195,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 button.setAccessibleName("More menus")
                 button.setFocusPolicy(QtCore.Qt.FocusPolicy.TabFocus)
 
-    def set_native_style(self, native: bool) -> None:
-        """Switch between the application's own look and the system style."""
-        self._settings.setValue("ui/native_style", bool(native))
-        self.theme.set_native(native)
+    def set_theme(self, mode: str) -> None:
+        """Switch the theme at once and remember it."""
+        self._settings.setValue("ui/theme", mode)
+        self.theme.set_mode(mode)
+        for name, action in self.theme_actions.items():
+            action.setChecked(name == self.theme.mode())
+        self.update_steps()
 
     def show_first_steps(self) -> None:
         self._open_box("First steps", "<h3>First steps</h3><ol>%s</ol><p>%s</p>" % (
