@@ -8,6 +8,7 @@ from collections.abc import Callable
 
 from .. import about
 from ..calibration import result_folder
+from ..diagram import DEFAULT_ZOOM, ZOOMS, number, zoom_of
 from ..driver import Driver
 from ..emulator import (
     DEFAULT_PRODUCT_ID,
@@ -174,6 +175,27 @@ class MainWindow(QtWidgets.QMainWindow):
             self.theme_actions[mode] = action
         self.theme_menu = theme_menu
 
+        zoom_menu = view_menu.addMenu("Diagram &zoom")
+        self.zoom_group = QtGui.QActionGroup(self)
+        self.zoom_group.setExclusive(True)
+        self.zoom_actions: dict[float, QtGui.QAction] = {}
+        stored = self._settings.value("ui/diagram_zoom", DEFAULT_ZOOM, type=float)
+        current = zoom_of(float(stored))
+        for centre in ZOOMS:
+            action = QtGui.QAction("Centre at %s" % number(centre), self)
+            action.setCheckable(True)
+            action.setChecked(centre == current)
+            action.setToolTip("The middle of the direction diagram stands for %s, its "
+                              "dashed ring for 1.0" % number(centre))
+            action.triggered.connect(
+                lambda _checked=False, centre=centre: self.set_diagram_zoom(centre))
+            self.zoom_group.addAction(action)
+            zoom_menu.addAction(action)
+            self.zoom_actions[centre] = action
+        zoom_menu.setToolTipsVisible(True)
+        self.zoom_menu = zoom_menu
+        self.calibration_panel.diagram.set_zoom(current)
+
         help_menu = self.menuBar().addMenu("&Help")
         self.steps_action = QtGui.QAction("&First steps", self)
         self.steps_action.setShortcut(
@@ -194,6 +216,14 @@ class MainWindow(QtWidgets.QMainWindow):
             if button.objectName() == "qt_menubar_ext_button":
                 button.setAccessibleName("More menus")
                 button.setFocusPolicy(QtCore.Qt.FocusPolicy.TabFocus)
+
+    def set_diagram_zoom(self, centre: float) -> None:
+        """Choose what the centre of the direction diagram stands for; remembered."""
+        centre = zoom_of(centre)
+        self._settings.setValue("ui/diagram_zoom", centre)
+        self.calibration_panel.diagram.set_zoom(centre)
+        for value, action in self.zoom_actions.items():
+            action.setChecked(value == centre)
 
     def set_theme(self, mode: str) -> None:
         """Switch the theme at once and remember it."""

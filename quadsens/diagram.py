@@ -6,13 +6,19 @@ unit circle of raw movement comes out as four quarter-ellipse arcs: the
 quadrant between right and up has the right and the up multiplier as its
 semi-axes, and so on. The arcs meet on the axes, at the tips of the arrows.
 
-Multipliers differ from 1.0 by a percent or two, which would not be visible
-at true scale. The deviation from 1.0 is therefore drawn enlarged by one fixed
-factor, EXAGGERATION, applied to the four semi-axes before anything is drawn,
-so that curve and arrows always agree. Values whose enlarged radius would
-leave the drawable range are drawn at its edge and flagged as clamped.
+The radial scale is linear and labelled. It is fixed by one number, the
+multiplier that the centre of the diagram stands for; the reference ring is
+always 1.0 and the outer limit lies as far above 1.0 as the centre lies below:
 
-All lengths are in units of the reference circle's radius (1.0 = no change);
+    centre 0.5   ->  0.5 .. 1.5   (the default)
+    centre 0.9   ->  0.9 .. 1.1   (ten times enlarged)
+    centre 0.95  ->  0.95 .. 1.05 (twenty times enlarged)
+
+The same mapping is applied to the four semi-axes before anything is drawn, so
+curve and arrows always agree, and there is no other enlargement. A value
+outside the scale is drawn at its edge and flagged as clamped.
+
+All lengths are in units of the reference ring's radius (1.0 = no change);
 x grows to the right and y grows downwards, as on screen.
 """
 
@@ -23,34 +29,55 @@ from dataclasses import dataclass
 
 from .model import Scalars, format_deviation
 
-EXAGGERATION = 20.0
-# Drawn radius of a clamped value. 0.3 keeps the curve clear of the centre,
-# 1.7 keeps it inside the widget: +-3.5 % at the factor above.
-MIN_RADIUS, MAX_RADIUS = 0.3, 1.7
+# The multipliers the centre can stand for ("diagram zoom").
+ZOOMS: tuple[float, ...] = (0.5, 0.9, 0.95)
+DEFAULT_ZOOM = 0.5
+# Drawn radius of the outer limit, and the shortest arrow that is still drawn:
+# a value at or below the centre would otherwise vanish.
+MAX_RADIUS, MIN_RADIUS = 2.0, 0.08
 # A value this close to 1.0 counts as "no deviation" (half of the fourth decimal).
 ON_RING = 5e-5
 NAMES: tuple[str, ...] = ("Right", "Left", "Down", "Up")
 # Unit vectors of the four arrows on screen, in the order of NAMES.
 VECTORS: tuple[tuple[int, int], ...] = ((1, 0), (-1, 0), (0, 1), (0, -1))
 LEGEND = "Outside the dashed ring: faster than 1.0. Inside: slower."
+# Guide rings to choose from, as deviation from 1.0 in percent. At the default
+# zoom they are labelled as multipliers (0.75, 1.25), otherwise in percent.
+GUIDE_STEPS: dict[float, tuple[int, ...]] = {0.5: (25,), 0.9: (2, 5), 0.95: (1, 2)}
 
 OUTSIDE, INSIDE, ON = "outside", "inside", "on"
 WORDS = {OUTSIDE: "faster", INSIDE: "slower", ON: "unchanged"}
 
 
-def clamp_limit_percent() -> float:
-    """Largest deviation in percent that is still drawn to scale."""
-    return round((MAX_RADIUS - 1.0) / EXAGGERATION * 100, 2)
+def zoom_of(centre: float) -> float:
+    """The nearest supported centre value."""
+    return min(ZOOMS, key=lambda zoom: abs(zoom - centre))
 
 
-def drawn_radius(value: float) -> float:
-    """Radius at which a multiplier is drawn: deviation enlarged, then clamped."""
-    return min(MAX_RADIUS, max(MIN_RADIUS, 1.0 + (value - 1.0) * EXAGGERATION))
+def factor(centre: float = DEFAULT_ZOOM) -> float:
+    """How much a deviation from 1.0 is enlarged: 2, 10 or 20."""
+    return 1.0 / (1.0 - centre)
 
 
-def is_clamped(value: float) -> bool:
-    exact = 1.0 + (value - 1.0) * EXAGGERATION
-    return exact < MIN_RADIUS - 1e-9 or exact > MAX_RADIUS + 1e-9
+def limits(centre: float = DEFAULT_ZOOM) -> tuple[float, float]:
+    """Smallest and largest multiplier that is drawn to scale."""
+    return (centre, 2.0 - centre)
+
+
+def number(value: float) -> str:
+    """A scale value without needless zeros: 0.5, 0.95, 1.25."""
+    return f"{value:.2f}".rstrip("0").rstrip(".") if value != int(value) else f"{value:.1f}"
+
+
+def drawn_radius(value: float, centre: float = DEFAULT_ZOOM) -> float:
+    """Radius at which a multiplier is drawn: 0 at the centre value, 1 at 1.0."""
+    exact = (value - centre) / (1.0 - centre)
+    return min(MAX_RADIUS, max(MIN_RADIUS, exact))
+
+
+def is_clamped(value: float, centre: float = DEFAULT_ZOOM) -> bool:
+    low, high = limits(centre)
+    return value < low - 1e-9 or value > high + 1e-9
 
 
 def side_of_ring(value: float) -> str:
@@ -96,17 +123,25 @@ class Arrow:
 class Geometry:
     arrows: tuple[Arrow, ...]                   # right, left, down, up
     curve: tuple[tuple[float, float], ...]      # closed outline of what is applied
-    guides: tuple[tuple[int, float], ...]       # (deviation in percent, radius) of guide rings
+    guides: tuple[tuple[str, float], ...]       # (label, radius) of the guide rings
     extent: float                               # largest radius that has to fit
     caption: str
+    centre: float = DEFAULT_ZOOM                # the multiplier at the centre
 
     @property
     def flat(self) -> bool:
         """True when nothing deviates: the curve is the reference circle."""
         return all(arrow.side == ON for arrow in self.arrows)
 
+    @property
+    def centre_label(self) -> str:
+        return number(self.centre)
+
     def describe(self) -> str:
-        return "; ".join(arrow.describe() for arrow in self.arrows)
+        """The four values in words, and how the scale is to be read."""
+        low, high = limits(self.centre)
+        return ("; ".join(arrow.describe() for arrow in self.arrows)
+                + f". Scale: centre {number(low)}, dashed ring 1.0, edge {number(high)}")
 
 
 def curve_points(radii: tuple[float, float, float, float],
@@ -131,30 +166,47 @@ def curve_points(radii: tuple[float, float, float, float],
     return tuple(points)
 
 
-def guide_rings(radii: tuple[float, ...]) -> tuple[tuple[int, float], ...]:
-    """Guide rings at a round deviation that suits what is drawn: one inside, one outside."""
-    reach = max(abs(radius - 1.0) for radius in radii) / EXAGGERATION * 100
-    percent = 1 if reach <= 1.2 else 2 if reach <= 2.6 else 3
-    step = percent / 100 * EXAGGERATION
-    return ((-percent, 1.0 - step), (percent, 1.0 + step))
+def guide_rings(radii: tuple[float, ...],
+                centre: float = DEFAULT_ZOOM) -> tuple[tuple[str, float], ...]:
+    """Guide rings at a round value that suits what is drawn: one inside, one outside.
+
+    A ring that would fall on the centre or beyond the outer limit is left out.
+    """
+    scale = factor(centre)
+    reach = max(abs(radius - 1.0) for radius in radii) / scale * 100
+    steps = GUIDE_STEPS[zoom_of(centre)]
+    percent = next((step for step in steps if reach <= step * 1.2), steps[-1])
+    rings = []
+    for sign in (-1, 1):
+        radius = 1.0 + sign * percent / 100 * scale
+        if not MIN_RADIUS * 2 < radius < MAX_RADIUS - 1e-9:
+            continue
+        if zoom_of(centre) == DEFAULT_ZOOM:
+            label = number(1.0 + sign * percent / 100)
+        else:
+            label = f"{sign * percent:+d} %"
+        rings.append((label, radius))
+    return tuple(rings)
 
 
-def geometry(scalars: Scalars, per_quadrant: int = 24) -> Geometry:
+def geometry(scalars: Scalars, centre: float = DEFAULT_ZOOM,
+             per_quadrant: int = 24) -> Geometry:
     """Everything the diagram draws for the four multipliers right, left, down, up."""
+    centre = zoom_of(centre)
     values = scalars.as_tuple()
     arrows = tuple(
-        Arrow(name, value, drawn_radius(value), is_clamped(value), side_of_ring(value), vector)
+        Arrow(name, value, drawn_radius(value, centre), is_clamped(value, centre),
+              side_of_ring(value), vector)
         for name, value, vector in zip(NAMES, values, VECTORS))
     radii = tuple(arrow.radius for arrow in arrows)
-    guides = guide_rings(radii)
-    extent = max(*radii, *(radius for _percent, radius in guides), 1.0)
-    factor = f"×{EXAGGERATION:g}"
+    guides = guide_rings(radii, centre)
+    extent = max(*radii, *(radius for _label, radius in guides), 1.0)
+    low, high = limits(centre)
+    caption = f"Centre = {number(low)}, dashed ring = 1.0."
     if all(arrow.side == ON for arrow in arrows):
-        caption = f"No deviation from 1.0 (a deviation would be drawn {factor})."
+        caption = "No deviation: the curve lies on the dashed ring. " + caption
     elif any(arrow.clamped for arrow in arrows):
-        caption = (f"Deviation from 1.0 drawn {factor}; beyond ±{clamp_limit_percent():g} % "
-                   "it is drawn at the edge (double arrow head).")
-    else:
-        caption = f"Deviation from 1.0 drawn {factor}."
+        caption += (f" Values outside {number(low)} to {number(high)} are drawn at the "
+                    "edge (double arrow head).")
     return Geometry(arrows, curve_points(radii, per_quadrant), guides,  # type: ignore[arg-type]
-                    extent, caption)
+                    extent, caption, centre)

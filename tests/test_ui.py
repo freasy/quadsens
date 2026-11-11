@@ -930,7 +930,8 @@ class MainWindowTest(unittest.TestCase):
         assert shape is not None
         self.assertEqual([arrow.name for arrow in shape.arrows],
                          ["Right", "Left", "Down", "Up"])
-        self.assertIn("drawn ×20", shape.caption)
+        self.assertIn("Centre = 0.5, dashed ring = 1.0", shape.caption)
+        self.assertIn("Scale: centre 0.5, dashed ring 1.0, edge 1.5", description)
         self.assertIn("faster", cal.diagram.toolTip())
         self.assertIn("Outside the dashed ring", cal.diagram.toolTip())
         self.assertEqual((cal.diagram.minimumSize().width(),
@@ -949,6 +950,42 @@ class MainWindowTest(unittest.TestCase):
         drv.apply_button.click()
         self.assertEqual([label.text() for label in drv.deviation_labels],
                          ["+3.8 %", "-3.8 %", "+12.5 %", "-12.5 %"])
+
+    def test_diagram_zoom_is_chosen_in_the_view_menu_and_remembered(self) -> None:
+        window = self.make_window()
+        diagram = window.calibration_panel.diagram
+        self.assertEqual(window.zoom_menu.title(), "Diagram &zoom")
+        self.assertEqual([action.text() for action in window.zoom_actions.values()],
+                         ["Centre at 0.5", "Centre at 0.9", "Centre at 0.95"])
+        self.assertTrue(window.zoom_group.isExclusive())
+        self.assertEqual([a.isChecked() for a in window.zoom_actions.values()],
+                         [True, False, False])
+        self.assertEqual(diagram.zoom(), 0.5)
+        right = diagram.shape().arrows[0]
+        self.assertAlmostEqual(right.radius, 1.075)   # 1.0375 with the centre at 0.5
+        self.assertFalse(right.clamped)
+
+        window.zoom_actions[0.95].trigger()
+        self.assertEqual(diagram.zoom(), 0.95)
+        shape = diagram.shape()
+        self.assertEqual(shape.centre_label, "0.95")
+        self.assertAlmostEqual(shape.arrows[0].radius, 1.75)
+        self.assertIn("Centre = 0.95", shape.caption)
+        self.assertIn("Scale: centre 0.95", diagram.accessibleDescription())
+        self.assertEqual([a.isChecked() for a in window.zoom_actions.values()],
+                         [False, False, True])
+        window.show()
+        _app.processEvents()
+        self.assertFalse(diagram.grab().isNull())
+        window.close()
+
+        again = self.make_window()   # remembered
+        self.assertEqual(again.calibration_panel.diagram.zoom(), 0.95)
+        self.assertTrue(again.zoom_actions[0.95].isChecked())
+        again.zoom_actions[0.9].trigger()
+        self.assertEqual(again.calibration_panel.diagram.zoom(), 0.9)
+        again.zoom_actions[0.5].trigger()
+        self.assertEqual(again.calibration_panel.diagram.zoom(), 0.5)
 
     def test_hints_and_messages_do_not_grow_the_window(self) -> None:
         # Worst case of problems: no uhid, module not loaded, no result, no tool.

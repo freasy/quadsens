@@ -23,7 +23,7 @@ their normal, hover, pressed, focused and disabled states, the banner kinds
 and the stepper, once per theme (black and red, system light, system dark).
 
 --diagrams renders the direction diagram alone for three sets of multipliers
-(a real result, all 1.0, strongly lopsided) into DIRECTORY.
+(a real result, all 1.0, strongly lopsided) at each diagram zoom into DIRECTORY.
 
 --gallery renders what the main screenshot does not show into DIRECTORY: a
 problem state with warning and error banners, the About dialog and the open
@@ -48,6 +48,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from quadsens import emulator  # noqa: E402
+from quadsens.diagram import ZOOMS  # noqa: E402
 from quadsens.driver import PARAM_NAMES, Driver  # noqa: E402
 from quadsens.model import Scalars  # noqa: E402
 from quadsens.persist import SaveState, Saver  # noqa: E402
@@ -267,21 +268,24 @@ DIAGRAM_CASES = {
 
 
 def diagram_renders(directory: Path, size: tuple[int, int] = (360, 300)) -> None:
-    """The diagram on a card, once per case, as diagram-<case>.png."""
+    """The diagram on a card, once per case and zoom, as zoom-<case>-<centre>.png."""
     app = QtWidgets.QApplication.instance()
     directory.mkdir(parents=True, exist_ok=True)
-    for name, scalars in DIAGRAM_CASES.items():
+    for name, scalars, centre in [(name, scalars, centre)
+                                  for name, scalars in DIAGRAM_CASES.items()
+                                  for centre in ZOOMS]:
         card = Card("sample")
         layout = QtWidgets.QVBoxLayout(card)
         layout.setContentsMargins(12, 8, 12, 8)
         widget = DirectionDiagram()
+        widget.set_zoom(centre)
         widget.set_scalars(scalars)
         layout.addWidget(widget)
         card.resize(*size)
         card.show()
         for _ in range(4):
             app.processEvents()
-        target = directory / f"diagram-{name}.png"
+        target = directory / f"zoom-{name}-{str(centre).replace('.', '')}.png"
         card.grab().save(str(target))
         card.close()
         card.deleteLater()

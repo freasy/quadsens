@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from ..calibration import DIRECTION_LABELS
-from ..diagram import LEGEND, Geometry, geometry
+from ..diagram import DEFAULT_ZOOM, LEGEND, Geometry, geometry, zoom_of
 from ..model import Scalars
 from . import theme
 from .qt import QtCore, QtGui, QtWidgets
@@ -20,8 +20,9 @@ class DirectionDiagram(QtWidgets.QWidget):
     arrow that ends outside the ring speeds its direction up, one that ends
     inside slows it down; each is labelled with its value, the signed percent
     and the word "faster" or "slower", so nothing depends on reading lengths or
-    colours. Deviations are drawn enlarged by one fixed factor, which the
-    caption states (see quadsens.diagram for the geometry).
+    colours. The radial scale is linear and labelled: the centre stands for
+    0.5 by default (or 0.9 or 0.95, the "diagram zoom"), the ring for 1.0; see
+    quadsens.diagram for the geometry.
 
     The eight values the calibration measured are not drawn; they are listed
     under "Measured values" and remain part of the accessible description.
@@ -32,6 +33,7 @@ class DirectionDiagram(QtWidgets.QWidget):
         self._values: tuple[float, ...] | None = None
         self._scalars: Scalars | None = None
         self._geometry: Geometry | None = None
+        self._zoom = DEFAULT_ZOOM
         self.setMinimumSize(230, 150)
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                            QtWidgets.QSizePolicy.Policy.Expanding)
@@ -57,10 +59,18 @@ class DirectionDiagram(QtWidgets.QWidget):
         self._values = tuple(values) if values is not None else None
         self._describe()
 
+    def zoom(self) -> float:
+        """The multiplier the centre of the diagram stands for."""
+        return self._zoom
+
+    def set_zoom(self, centre: float) -> None:
+        self._zoom = zoom_of(centre)
+        self.set_scalars(self._scalars)
+
     def set_scalars(self, scalars: Scalars | None) -> None:
         """The four multipliers as the driver takes them: right, left, down, up."""
         self._scalars = scalars
-        self._geometry = geometry(scalars) if scalars is not None else None
+        self._geometry = (geometry(scalars, self._zoom) if scalars is not None else None)
         self._describe()
 
     def describe(self) -> str:
@@ -137,23 +147,22 @@ class DirectionDiagram(QtWidgets.QWidget):
         def at(x: float, y: float) -> QtCore.QPointF:
             return QtCore.QPointF(center.x() + x * unit, center.y() + y * unit)
 
-        # Guide rings at round deviations, labelled on the left diagonals.
+        # Guide rings at round values, labelled on the upper left diagonal.
         painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
         faint = QtGui.QColor(ring)
         faint.setAlphaF(0.55)
         painter.setFont(tiny)
-        for index, (percent, radius) in enumerate(shape.guides):
+        for label, radius in shape.guides:
             painter.setPen(QtGui.QPen(faint, 1))
             painter.drawEllipse(center, radius * unit, radius * unit)
-            label = f"{percent:+d} %"
             width = tiny_metrics.horizontalAdvance(label)
             diagonal = 0.7071 * radius * unit
             # Outer ring: label above-left outside it. Inner ring: just inside it in
             # the same direction, left out when the ring is too small to hold it.
-            if percent > 0:
+            if radius > 1.0:
                 spot = QtCore.QPointF(center.x() - diagonal - width - 3,
                                       center.y() - diagonal - tiny_metrics.height())
-            elif radius * unit >= 30:
+            elif radius * unit >= 24:
                 inset = 0.7071 * (radius * unit - 11)
                 spot = QtCore.QPointF(center.x() - inset - width / 2,
                                       center.y() - inset - tiny_metrics.height() / 2)
@@ -164,7 +173,9 @@ class DirectionDiagram(QtWidgets.QWidget):
                                            tiny_metrics.height()),
                              int(flags.AlignCenter), label)
 
-        # What is applied: one smooth closed curve, lightly filled.
+        # What is applied: one smooth closed curve with a broad solid outline. The
+        # reference ring is drawn over it, thin and dashed, so that both remain
+        # visible where they nearly coincide: the outline shows around the dashes.
         path = QtGui.QPainterPath()
         first = True
         for x, y in shape.curve:
@@ -176,18 +187,18 @@ class DirectionDiagram(QtWidgets.QWidget):
         path.closeSubpath()
         fill = theme.color("accent")
         fill.setAlphaF(0.22)
-        painter.setPen(QtGui.QPen(accent, 1.6))
+        painter.setPen(QtGui.QPen(accent, 2.6))
         painter.setBrush(fill)
         painter.drawPath(path)
 
         # The reference: dashed ring at 1.0, labelled once, with a tick on each axis.
         painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-        painter.setPen(QtGui.QPen(text_color, 1.2, QtCore.Qt.PenStyle.DashLine))
+        painter.setPen(QtGui.QPen(text_color, 1.0, QtCore.Qt.PenStyle.DashLine))
         painter.drawEllipse(center, unit, unit)
-        painter.setPen(QtGui.QPen(text_color, 1.2))
+        painter.setPen(QtGui.QPen(text_color, 1.0))
         for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            painter.drawLine(at(dx - dy * 0.06, dy - dx * 0.06),
-                             at(dx + dy * 0.06, dy + dx * 0.06))
+            painter.drawLine(at(dx - dy * 0.05, dy - dx * 0.05),
+                             at(dx + dy * 0.05, dy + dx * 0.05))
         painter.setFont(tiny)
         painter.setPen(text_color)
         diagonal = 0.7071 * unit
@@ -253,9 +264,21 @@ class DirectionDiagram(QtWidgets.QWidget):
                     painter.drawText(QtCore.QRectF(x, y, width + 2, line), int(vcenter),
                                      piece)
                     x += width + gap
+        # Tip markers on the curve: where exactly each arrow ends.
+        painter.setPen(QtGui.QPen(accent, 1.4))
+        painter.setBrush(theme.color("surface"))
+        for arrow in shape.arrows:
+            painter.drawEllipse(at(*arrow.tip), 2.6, 2.6)
+        # The centre, labelled with the multiplier it stands for.
         painter.setPen(QtCore.Qt.PenStyle.NoPen)
         painter.setBrush(text_color)
         painter.drawEllipse(center, 3.0, 3.0)
+        painter.setFont(tiny)
+        painter.setPen(text_color)
+        width = tiny_metrics.horizontalAdvance(shape.centre_label)
+        painter.drawText(QtCore.QRectF(center.x() + 5, center.y() + 3, width + 2,
+                                       tiny_metrics.height()),
+                         int(flags.AlignCenter), shape.centre_label)
         painter.end()
 
 

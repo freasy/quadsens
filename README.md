@@ -211,9 +211,11 @@ work in any order.
    *Calibration result* then shows what the driver will apply: a dashed ring
    for 1.0 and a curve through four arrows, one per direction. An arrow that
    ends outside the ring makes its direction faster, one that ends inside
-   makes it slower; each is labelled with its value and percent. Deviations
-   are drawn 20 times enlarged, as the caption says. *Measured values* shows
-   the raw numbers, including the eight measured directions.
+   makes it slower; each is labelled with its value and percent. The scale
+   is linear: the centre stands for 0.5 and the ring for 1.0, so a deviation
+   of a percent or two is only a few pixels (*View > Diagram zoom* enlarges
+   it). *Measured values* shows the raw numbers, including the eight measured
+   directions.
 4. **Use result.** Press *Use result*. The four new values are filled in and
    the changed rows are marked as unsaved.
 5. **Apply.** Press *Apply*. The *Driver reports* column shows what the module
@@ -237,6 +239,10 @@ Less common controls:
   the last applied values again whenever it starts; it is not needed once the
   values are saved to the config.
 - *View > Theme* chooses the look; see [Appearance](#appearance).
+- *View > Diagram zoom* sets what the centre of the direction diagram stands
+  for: 0.5 (default), 0.9 or 0.95, with the dashed ring always at 1.0. The
+  closer the centre is to 1.0, the more a small deviation is spread out; the
+  caption and the labels in the diagram state the scale in use.
 - *File > Open result folder* (Ctrl+O) opens the folder of the result file.
   *Help > First steps* (F1) shows the steps, and *Help > Setup help* lists
   what is not set up yet together with the commands to fix it.
