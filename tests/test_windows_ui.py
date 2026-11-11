@@ -32,6 +32,9 @@ ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = Path(__file__).parent / "fixtures"
 _app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(["test"])
 VALUES = Scalars(1.011, 0.991, 1.006, 0.996)
+# The stand-in for writer.exe is a shell script, which only POSIX can start.
+POSIX = os.name == "posix"
+needs_fake_writer = unittest.skipUnless(POSIX, "the stand-in for writer.exe is a shell script")
 
 
 class WindowsWindowTest(unittest.TestCase):
@@ -63,7 +66,8 @@ class WindowsWindowTest(unittest.TestCase):
         script = self.folder / "writer.exe"
         script.write_text(f'#!/bin/sh\necho "$@" >> "{self.folder}/writer.log"\n'
                           f'echo "{text}"\nexit {status}\n')
-        script.chmod(0o755)
+        if POSIX:
+            script.chmod(0o755)
 
     def make(self, choose: bool = True) -> WindowsMainWindow:
         settings = QtCore.QSettings(str(self.tmp / "settings.ini"),
@@ -104,6 +108,7 @@ class WindowsWindowTest(unittest.TestCase):
         hint = window.minimumSizeHint()
         self.assertLessEqual((hint.width() <= 760, hint.height() <= 560), (True, True), hint)
 
+    @needs_fake_writer
     def test_walk_through_import_folder_preview_apply(self) -> None:
         window = self.make(choose=False)
         panel = window.rawaccel_panel
@@ -145,6 +150,7 @@ class WindowsWindowTest(unittest.TestCase):
         self.assertEqual(len(backups), 1)
         self.assertEqual(rawaccel.read(backups[0]).values(0), Four(1000.0, 1.0, 1.0, 1.0))
 
+    @needs_fake_writer
     def test_applying_again_does_not_compound_and_restore_goes_back(self) -> None:
         window = self.make()
         panel = window.rawaccel_panel
@@ -177,6 +183,7 @@ class WindowsWindowTest(unittest.TestCase):
         self.assertEqual(self.settings_file.read_bytes(),
                          (FIXTURES / "rawaccel" / "settings-1.7.1-default.json").read_bytes())
 
+    @needs_fake_writer
     def test_values_changed_in_rawaccel_become_the_new_baseline(self) -> None:
         window = self.make()
         panel = window.rawaccel_panel
@@ -196,6 +203,7 @@ class WindowsWindowTest(unittest.TestCase):
         self.wait(window)
         self.assertAlmostEqual(self.file_values().sens, 1200.0)
 
+    @needs_fake_writer
     def test_profiles_acceleration_note_and_flip(self) -> None:
         shutil.copy(FIXTURES / "rawaccel" / "settings-1.7.1-profiles.json", self.settings_file)
         window = self.make()
@@ -246,6 +254,7 @@ class WindowsWindowTest(unittest.TestCase):
         self.assertIn("does not exist", panel.message.text())
         self.assertIn("Start RawAccel once", panel.message.text())
 
+    @needs_fake_writer
     def test_writer_failure_and_missing_writer(self) -> None:
         self.writer(1, "Bad settings")
         window = self.make()
@@ -267,7 +276,7 @@ class WindowsWindowTest(unittest.TestCase):
         self.assertEqual(panel.message.kind, "warning")
         self.assertAlmostEqual(self.file_values().sens, 1020.0)
 
-    @unittest.skipIf(os.geteuid() == 0, "root can write everywhere")
+    @unittest.skipUnless(POSIX and os.geteuid() != 0, "needs POSIX permissions, not root")
     def test_write_protected_folder(self) -> None:
         window = self.make()
         panel = window.rawaccel_panel

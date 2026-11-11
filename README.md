@@ -313,6 +313,10 @@ Less common controls:
   swapped on your setup. *Apply saved values on start* makes QuadSens write
   the last applied values again whenever it starts; it is not needed once the
   values are saved to the config.
+- *File > Export values…* writes the four multipliers (and the eight measured
+  values, if known) to a small file, and *File > Import values…* reads one.
+  The file holds nothing personal. It is how a calibration gets from Linux to
+  the Windows preview.
 - *View > Theme* chooses the look; see [Appearance](#appearance).
 - *View > Diagram zoom* sets what the centre of the direction diagram stands
   for: 0.5 (default), 0.9 or 0.95, with the dashed ring always at 1.0. The
@@ -349,6 +353,90 @@ state of the virtual mouse in
   not validated by any vendor, and there is no guarantee that they improve
   anything.
 
+## Windows (preview)
+
+**The Windows build has not been run on real Windows yet.** It was written and
+tested on Linux, with stand-ins for RawAccel's files and for `writer.exe`.
+Treat everything in this section as untested until that sentence is gone.
+
+On Windows QuadSens applies values only. It does not create the virtual
+mouse, so the calibration itself cannot be started from Windows.
+
+![The window as composed on Windows](docs/screenshot-windows.png)
+
+(The picture was rendered on Linux and shows the layout, not Windows itself.)
+
+**What works**
+
+- Getting the four multipliers in three ways: the newest result file of the
+  game, if there is one (looked for in
+  `%USERPROFILE%\AppData\LocalLow\Statespace\aimlab_tb\Users\<id>\ASFData\<device>\ASFSettings.json`;
+  that location is an assumption taken from the layout on Linux); *File >
+  Import values…* with a file exported by QuadSens on Linux; or typing them.
+- The diagram, as on Linux.
+- Writing the multipliers into the settings of
+  [RawAccel](https://github.com/RawAccelOfficial/rawaccel) and letting it load
+  them.
+
+**What does not**
+
+- No virtual mouse, so no calibration on Windows. Calibrate on Linux and use
+  *File > Export values…* there, or type the values.
+- No driver installation: install RawAccel yourself.
+- Nothing is re-applied at start by QuadSens (see below).
+
+**Requirements**
+
+- RawAccel, unpacked and installed as its own instructions say. QuadSens was
+  written against the setting names of RawAccel 1.7.1 and also recognises
+  those of 1.6.x; with any other naming it refuses to write.
+- The folder must be writable for you, because `settings.json` in it is
+  changed.
+
+**Usage**
+
+1. Get the values (see above). An imported file fills the four multipliers
+   directly; with a result file press *Use result*.
+2. *Choose folder…* and pick the folder that holds `rawaccel.exe`,
+   `writer.exe` and `settings.json`. A few common places are tried on their
+   own. With several profiles, pick the one to change.
+3. Look at the table: current and new value of the four RawAccel settings
+   (output DPI or sensitivity, Y/X ratio, L/R ratio, U/D ratio).
+4. *Apply* writes `settings.json` and runs `writer.exe settings.json`, which
+   makes RawAccel load it. If `writer.exe` reports a problem it shows its own
+   message window.
+
+**Exact or approximate.** RawAccel applies these four settings after its
+acceleration curve; the Linux driver applies the multipliers before the curve.
+For a profile without acceleration the result is exactly the four
+multipliers. With an acceleration curve it is an approximation. The panel
+says which case the selected profile is.
+
+**Backup and restore.** The first time QuadSens changes a settings file it
+keeps a copy next to it, `settings.quadsens-backup-YYYYmmdd-HHMMSS.json`, and
+remembers the four original values of the profile. New values are always
+computed from those originals, so applying again does not multiply twice.
+*Restore original* writes the four originals back. Only those four numbers
+are ever changed; the rest of the file stays byte for byte. If you change the
+four settings in RawAccel yourself later, QuadSens takes your values as the
+new originals.
+
+**After a restart.** RawAccel forgets its settings when Windows shuts down.
+The values stay in `settings.json`, so whatever loads that file at start
+brings them back: RawAccel's own startup mechanism if you set it up, or
+running `writer.exe settings.json` yourself. QuadSens does not add anything
+to the Windows startup.
+
+**Up and down.** The mapping of the calibration's two vertical values was
+verified on Linux only. If up and down feel swapped after applying, tick
+*Flip up/down* under *Advanced* and apply again.
+
+**Getting the program.** There is no released Windows build yet. Build it
+with `powershell -ExecutionPolicy Bypass -File build-windows.ps1` (needs
+Python 3.10 or newer), which writes `dist\quadsens.exe`. The executable is not
+signed, so Windows SmartScreen will warn about an unknown publisher the first
+time; that is expected for an unsigned program.
+
 ## Limitations and status
 
 - Tested end to end on one machine: Manjaro, KDE Plasma, Aimlabs under Steam
@@ -362,7 +450,8 @@ state of the virtual mouse in
 - New values are entered with four decimals.
 - The virtual device is built from an analysis of the protocol. A future
   version of the game or of Proton may stop accepting it.
-- Windows is not supported yet.
+- Windows: a preview that only applies values, not yet run on real Windows;
+  see [Windows (preview)](#windows-preview).
 
 ## Troubleshooting
 
@@ -481,6 +570,9 @@ quadsens/              application package
   calibration.py       find and parse the result file (no Qt)
   driver.py            read and write the module parameters (no Qt)
   driver_setup.py      detect the installed driver, prerequisites (no Qt)
+  platforms.py         which platform, where the result file is (no Qt)
+  values_file.py       the values file for import and export (no Qt)
+  rawaccel.py          RawAccel settings on Windows (no Qt)
   persist.py           save to the config file and verify it (no Qt)
   steps.py             the six guided steps, derived from state (no Qt)
   model.py             value types and number parsing (no Qt)
@@ -498,6 +590,8 @@ tests/
 99-quadsens.rules      udev rule
 quadsens.desktop       menu entry
 build.sh               builds dist/quadsens
+build-windows.ps1      builds dist\quadsens.exe (not yet run on Windows)
+.github/workflows/     tests and builds in CI (not yet run)
 ```
 
 ## License

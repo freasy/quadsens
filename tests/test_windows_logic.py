@@ -21,6 +21,8 @@ from quadsens.rawaccel import Four, RawAccelError
 from quadsens.values_file import ValuesError
 
 FIXTURES = Path(__file__).parent / "fixtures" / "rawaccel"
+# These tests also run on Windows in CI, where there is no geteuid and no chmod bits.
+POSIX_USER = os.name == "posix" and os.geteuid() != 0
 F17 = FIXTURES / "settings-1.7.1-default.json"
 F17_MULTI = FIXTURES / "settings-1.7.1-profiles.json"
 F16 = FIXTURES / "settings-1.6.1-default.json"
@@ -350,7 +352,7 @@ class FileTest(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.folder.iterdir()),
                          ["settings.json", "settings.quadsens-backup-20261111-105439.json"])
 
-    @unittest.skipIf(os.geteuid() == 0, "root can write everywhere")
+    @unittest.skipUnless(POSIX_USER, "needs POSIX permissions and a non-root user")
     def test_read_only_folder_is_reported(self) -> None:
         self.folder.chmod(0o555)
         self.addCleanup(self.folder.chmod, 0o755)
