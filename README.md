@@ -45,7 +45,9 @@ same window with colours taken from a light desktop is in
   [DIRECTIONAL_SCALING.md](https://github.com/freasy/YeetMouse/blob/feature/directional-scalars/DIRECTIONAL_SCALING.md)
   explains the parameters and the installation. The unmodified yeetmouse does
   not have these parameters, and its `yeetmousectl` does not save them; install
-  the fork's userspace tools along with the module.
+  the fork's userspace tools along with the module. QuadSens can install the
+  fork for you, see
+  [Installing the driver from QuadSens](#installing-the-driver-from-quadsens).
 - Aimlabs, installed through Steam and run with Proton.
 - Read/write access to `/dev/uhid` for your user (see
   [One-time setup](#one-time-setup)).
@@ -110,6 +112,69 @@ install -Dm644 quadsens.desktop ~/.local/share/applications/quadsens.desktop
 The menu entry starts the command `quadsens`, so `~/.local/bin` has to be in
 your `PATH`.
 
+## Installing the driver from QuadSens
+
+*Help > Driver setup* shows which yeetmouse driver is installed, checks what
+an install needs, and can install the fork or put the previous driver back.
+Nothing runs by itself: each action has its own button, has to be confirmed,
+and asks for your password once through `pkexec`.
+
+![Driver setup dialog](docs/screenshot-driver-setup.png)
+
+**What it does.** The installer is one shell script,
+[`helper/quadsens-driver.sh`](helper/quadsens-driver.sh). The dialog shows it
+in full before you run it. Be aware of what that means: as root, it
+**downloads source code from <https://github.com/freasy/YeetMouse> at one
+pinned commit and builds a kernel module from it.** It checks that it got
+exactly that commit and stops otherwise. The script text is passed to
+`pkexec /bin/sh -s` on standard input, so what the dialog shows is what runs;
+no file from your home directory or a temporary directory is executed as root.
+
+**What it changes.**
+
+- Builds and installs the module through DKMS as
+  `yeetmouse-driver/0.9.5+dirscale1` (source in `/usr/src`).
+- If an unmodified yeetmouse driver is installed through DKMS, removes it from
+  DKMS and moves its source from `/usr/src` to `/usr/local/src`, so that it can
+  be restored. A driver that belongs to a distribution package is not touched;
+  the installer stops and asks you to remove the package first.
+- Installs the fork's `yeetmousectl` to `/usr/bin`, `yeetmouse.service` and,
+  if there is none, a default `/etc/yeetmouse.conf`. An existing configuration
+  is kept. The fork's own settings window is not installed.
+- Creates group `yeetmouse` if needed and adds you to it. Log out and in again
+  afterwards.
+- Reloads the module and restarts the service. Mouse acceleration is off for a
+  moment while that happens.
+- Records what it did in `/var/lib/quadsens/driver-state`.
+
+**What it needs.** `dkms`, `git`, `make`, a C and a C++ compiler, `bash`, the
+kernel headers for the running kernel, and `pkexec`. The dialog lists what is
+missing together with the package to install on Arch/Manjaro, Debian/Ubuntu
+and Fedora.
+
+**Revert.** *Revert to previous driver* removes the fork's module and, if an
+unmodified driver was moved aside, puts it back and loads it. If there was
+none, no yeetmouse module is installed afterwards. `/etc/yeetmouse.conf` and
+the group are kept either way.
+
+**Dry run.** With *Dry run* ticked, the same script only looks at the system
+and prints every command it would run. That needs no password and changes
+nothing.
+
+**If an install fails.** The module and the tool are built before the
+installed driver is touched, so most failures change nothing. If it fails
+later, the script puts the previous driver back and the dialog says which
+state the system is in.
+
+**Status of this feature.** State detection, the prerequisite check, the dry
+run and the script's logic are tested against stand-in tools. **A real install
+and a real revert through this dialog have not been run yet.** Until that is
+confirmed, treat it as untested on real systems and keep the manual way at
+hand.
+
+**By hand instead.** The fork documents the manual installation in its
+[DIRECTIONAL_SCALING.md](https://github.com/freasy/YeetMouse/blob/feature/directional-scalars/DIRECTIONAL_SCALING.md).
+
 ## One-time setup
 
 ### Access to /dev/uhid
@@ -133,7 +198,8 @@ two `udevadm` commands.
 ### Access to the driver parameters
 
 The fork's `yeetmouse.service` hands the parameter files in
-`/sys/module/yeetmouse/parameters/` to group `yeetmouse`. Join that group:
+`/sys/module/yeetmouse/parameters/` to group `yeetmouse`. If you installed the
+driver from QuadSens you are a member already. Otherwise join that group:
 
 ```sh
 sudo usermod -aG yeetmouse "$USER"
@@ -262,8 +328,11 @@ state of the virtual mouse in
 - No real hardware is modified. Nothing is written to any physical mouse.
 - No game files are modified. QuadSens reads one result file and never writes
   to the game's directories.
-- The only system file it changes is `/etc/yeetmouse.conf`, and only when you
-  press *Save to config*; the writing is done by `yeetmousectl`.
+- In normal use the only system file it changes is `/etc/yeetmouse.conf`, and
+  only when you press *Save to config*; the writing is done by `yeetmousectl`.
+- *Help > Driver setup* is the exception: on request it installs or removes a
+  kernel module and the files listed under
+  [Installing the driver from QuadSens](#installing-the-driver-from-quadsens).
 - Presenting a virtual device to software that expects particular hardware may
   be against the terms of the software it interoperates with. Checking that is
   your responsibility.
@@ -315,8 +384,19 @@ sudo systemctl restart yeetmouse.service
 ```
 
 **The driver panel says "module not loaded" or "no DirScale parameters".**
-Load the module (`sudo modprobe yeetmouse`). If the parameters are still
-missing, the loaded module is the unmodified yeetmouse and not the fork.
+*Help > Driver setup* shows what is installed. If the fork is installed, load
+the module (`sudo modprobe yeetmouse`). If the parameters are missing, the
+loaded module is the unmodified yeetmouse; install the fork from that dialog
+or by hand.
+
+**Driver setup stops with "belongs to the package ...".**
+Your yeetmouse driver was installed by the package manager. Remove that
+package, then run the install again.
+
+**Driver setup failed.**
+The result line names the state the system is in, and the *Output* page has
+the numbered steps. *Revert to previous driver* puts the old driver back; the
+manual commands are in the fork's DIRECTIONAL_SCALING.md.
 
 **Apply reports "helper script quadsens-apply not found".**
 You are not in group `yeetmouse` and the helper is not installed system-wide.
@@ -327,7 +407,8 @@ They were applied but not saved. Apply them again and press *Save to config*.
 
 **Save to config is greyed out.**
 `yeetmousectl` was not found in `/usr/bin`, `/usr/local/bin` or `/bin`.
-Install the userspace tools of the yeetmouse fork.
+Install the userspace tools of the yeetmouse fork; *Help > Driver setup* does
+that as part of the install.
 
 **Save to config reports "Nothing directional was saved".**
 The installed `yeetmousectl` is the unmodified one, which does not know the
@@ -389,6 +470,7 @@ quadsens/              application package
   emulator.py          virtual HID mouse and protocol (no Qt)
   calibration.py       find and parse the result file (no Qt)
   driver.py            read and write the module parameters (no Qt)
+  driver_setup.py      detect the installed driver, prerequisites (no Qt)
   persist.py           save to the config file and verify it (no Qt)
   steps.py             the six guided steps, derived from state (no Qt)
   model.py             value types and number parsing (no Qt)
@@ -398,6 +480,7 @@ quadsens/              application package
   ui/                  Qt widgets; ui/qt.py selects PySide6 or PyQt6,
                        ui/theme.py builds the stylesheet
 helper/quadsens-apply  helper run through pkexec
+helper/quadsens-driver.sh  installs or reverts the fork (fed to pkexec sh)
 assets/quadsens.svg    application icon
 packaging/entry.py     entry point for the PyInstaller build
 tools/make_screenshot.py
