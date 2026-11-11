@@ -69,9 +69,9 @@ class RawAccelPanel(Card):
         self.folder_edit.setAccessibleName("RawAccel folder")
         self.folder_edit.setAccessibleDescription(
             "The folder that holds rawaccel.exe, writer.exe and settings.json.")
-        folder_label = QtWidgets.QLabel("F&older:")
-        folder_label.setBuddy(self.folder_edit)
-        self.choose_button = QtWidgets.QPushButton("&Choose folder…")
+        # No mnemonics here: every letter of both texts belongs to another control.
+        folder_label = QtWidgets.QLabel("Folder:")
+        self.choose_button = QtWidgets.QPushButton("Choose folder…")
         self.choose_button.setToolTip("Choose the folder where you unpacked RawAccel")
         self.choose_button.clicked.connect(lambda: self.choose_folder())
         folder_row = QtWidgets.QHBoxLayout()
@@ -177,7 +177,7 @@ class RawAccelPanel(Card):
         buttons.addWidget(self.apply_button, 1, 0)
         buttons.addWidget(self.restore_button, 1, 1)
 
-        self.flip_check = QtWidgets.QCheckBox("Flip up/do&wn")
+        self.flip_check = QtWidgets.QCheckBox("Flip up/dow&n")
         self.flip_check.setToolTip("Exchange the down and up multipliers. " + FLIP_HINT)
         self.flip_check.setChecked(bool(settings.value("rawaccel/flip_y", False, type=bool)))
         self.flip_check.toggled.connect(self._flip_toggled)
@@ -357,6 +357,11 @@ class RawAccelPanel(Card):
         """True when the file already holds the new values."""
         current, new = self.current(), self.new()
         return current is not None and new is not None and current.is_close(new, 2e-6)
+
+    def is_neutral(self) -> bool:
+        """True when the file holds the profile's own values: nothing of ours is in it."""
+        return self.document is not None and self.current() is not None \
+            and not self.can_restore()
 
     def can_restore(self) -> bool:
         current = self.current()

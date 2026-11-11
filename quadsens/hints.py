@@ -8,6 +8,13 @@ from __future__ import annotations
 
 from .calibration import NO_RESULT, NO_RESULT_FOLDER  # noqa: F401 (kept for importers)
 from .driver import DriverState, DriverStatus
+from .uhid_text import (  # noqa: F401 (kept for importers)
+    UHID_DENIED,
+    UHID_MISSING,
+    UHID_OK,
+    uhid_hint,
+    uhid_short,
+)
 from .persist import TOOL_NAME, TRUSTED_DIRS, SaveState
 
 SETUP_HELP = "Help > Setup help"
@@ -31,30 +38,6 @@ PERSIST = (
 FLIP_Y = (
     "The default mapping is verified against real results; switch this on only if up "
     "and down feel swapped on your setup.")
-
-UHID_OK, UHID_MISSING, UHID_DENIED = "ok", "missing", "denied"
-
-
-def uhid_hint(access: str) -> str:
-    """Long form: why the virtual mouse cannot be started, or "" when it can."""
-    if access == UHID_MISSING:
-        return ("/dev/uhid does not exist, so no virtual mouse can be created. Load the "
-                "kernel module: sudo modprobe uhid")
-    if access == UHID_DENIED:
-        return ("/dev/uhid is not writable for you. Install the udev rule "
-                "99-quadsens.rules, join group input and log in again (README, "
-                "\"One-time setup\").")
-    return ""
-
-
-def uhid_short(access: str) -> str:
-    """Short form of uhid_hint for the status line."""
-    if access == UHID_MISSING:
-        return f"/dev/uhid is missing ({SETUP_HELP})"
-    if access == UHID_DENIED:
-        return f"/dev/uhid is not writable ({SETUP_HELP})"
-    return ""
-
 
 def driver_status(state: DriverState, helper_installed: bool = True) -> str:
     """Short status line for the driver panel; at most two lines in the window."""

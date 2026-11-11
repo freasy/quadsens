@@ -230,7 +230,7 @@ class StepsBar(QtWidgets.QWidget):
                 self.next_button.setText(FIX_ACTIONS[current.fix])
                 self.next_button.setEnabled(True)
                 self.next_button.setAccessibleName(
-                    "Before the next step: open the driver setup")
+                    "Before the next step: %s" % FIX_ACTIONS[current.fix].rstrip("…"))
             else:
                 self.next_button.setText(action or "Waiting for the result")
                 self.next_button.setEnabled(bool(action) and not current.blocked)

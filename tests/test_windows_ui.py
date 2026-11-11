@@ -1,7 +1,10 @@
 """The Windows composition of the application, shown on Linux through the override.
 
 The RawAccel folder is a temp directory with a fixture settings.json and a
-script that stands in for writer.exe. Nothing here has run on Windows.
+script that stands in for writer.exe. usbip-win2 is a fake command runner
+that really connects the in-process USB/IP client to the server, so the
+virtual mouse goes through the same code as with the real driver, minus
+Windows itself.
 """
 
 from __future__ import annotations
@@ -9,6 +12,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -23,10 +28,13 @@ try:
 except ImportError:  # pragma: no cover - depends on the environment
     raise unittest.SkipTest("no Qt binding (PySide6) installed") from None
 
-from quadsens import rawaccel, values_file
+from quadsens import emulator, rawaccel, usbip_client, usbip_mouse, usbip_server, values_file
 from quadsens.model import Scalars
 from quadsens.rawaccel import Four
 from quadsens.ui.windows_window import WindowsMainWindow
+from quadsens.usbip_client import UsbipClient
+from quadsens.usbip_server import VirtualMouseServer
+from tests.test_usbip_windows import TOOL, FakeDriver
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -37,7 +45,9 @@ POSIX = os.name == "posix"
 needs_fake_writer = unittest.skipUnless(POSIX, "the stand-in for writer.exe is a shell script")
 
 
-class WindowsWindowTest(unittest.TestCase):
+class WindowCase(unittest.TestCase):
+    """A RawAccel folder, a fake usbip-win2 and helpers; the tests are below."""
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -69,12 +79,30 @@ class WindowsWindowTest(unittest.TestCase):
         if POSIX:
             script.chmod(0o755)
 
-    def make(self, choose: bool = True) -> WindowsMainWindow:
+    def make(self, choose: bool = True, tool: str | None = None,
+             port: int = 0) -> WindowsMainWindow:
+        """A window; ``tool`` is where usbip.exe "is", None for not installed."""
         settings = QtCore.QSettings(str(self.tmp / "settings.ini"),
                                     QtCore.QSettings.Format.IniFormat)
+        self.tool = tool
+        self.driver = FakeDriver()
+        self.mice: list[usbip_mouse.VirtualMouse] = []
+
+        def find_client() -> UsbipClient:
+            return UsbipClient(self.tool, self.driver)
+
+        def mouse_factory(product_id: int) -> usbip_mouse.VirtualMouse:
+            mouse = usbip_mouse.VirtualMouse(
+                find_client(), VirtualMouseServer(product_id, port=port))
+            self.mice.append(mouse)
+            return mouse
+
         window = WindowsMainWindow(settings, self.pattern,
                                    {"USERPROFILE": str(self.tmp / "profile"),
-                                    "SystemDrive": str(self.tmp / "nodrive")})
+                                    "SystemDrive": str(self.tmp / "nodrive")},
+                                   find_client=find_client, mouse_factory=mouse_factory)
+        window.opened: list[str] = []
+        window.open_url = lambda url: window.opened.append(url.toString())
         self.windows.append(window)
         if choose and window.rawaccel_panel.folder is None:
             window.rawaccel_panel.choose_folder(str(self.folder))
@@ -85,44 +113,96 @@ class WindowsWindowTest(unittest.TestCase):
         while window.rawaccel_panel.is_busy() and time.monotonic() < deadline:
             _app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 20)
 
+    def until(self, window: WindowsMainWindow, condition, seconds: float = 10.0) -> bool:
+        """Let the window poll the virtual mouse until ``condition`` holds."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            window.mouse_panel.poll()
+            _app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 10)
+            if condition():
+                return True
+            time.sleep(0.005)
+        return bool(condition())
+
+    def started(self, window: WindowsMainWindow) -> usbip_mouse.VirtualMouse:
+        """Start the virtual mouse and wait until the attach has been tried."""
+        window.mouse_panel.toggle_button.click()
+        mouse = window.mouse_panel.mouse()
+        assert mouse is not None
+        self.assertTrue(self.until(window, lambda: not mouse.busy))
+        self.until(window, lambda: True, 0.05)
+        return mouse
+
+    def write(self, prop: int, payload: bytes) -> None:
+        """What the game's software sends: a SET of one property."""
+        assert self.driver.client is not None
+        request = bytes([0, 1, 0, emulator.CMD_SET]) + struct.pack("<H", prop) + payload
+        self.driver.client.submit(usbip_server.DIR_OUT, 1, 64, data=request.ljust(64, b"\0"))
+        self.driver.client.reply()
+
+    def calibrate(self, values: Scalars) -> None:
+        for prop, value in zip((emulator.P_DIR_SENS_X_POS, emulator.P_DIR_SENS_X_NEG,
+                                emulator.P_DIR_SENS_Y_POS, emulator.P_DIR_SENS_Y_NEG),
+                               (values.x_pos, values.x_neg, values.y_pos, values.y_neg)):
+            self.write(prop, struct.pack("<f", value))
+        self.write(emulator.P_DIR_SENS_ENABLED, struct.pack("<I", 1))
+
     def statuses(self, window: WindowsMainWindow) -> str:
         return "".join(chip.text()[0] for chip in window.steps_bar.chips)
 
     def file_values(self, index: int = 0) -> Four:
         return rawaccel.read(self.settings_file).values(index)
 
+
+class WindowsWindowTest(WindowCase):
+    """Values in, RawAccel out; usbip-win2 is not installed in these."""
+
     def test_composition_has_no_linux_parts(self) -> None:
         window = self.make(choose=False)
         self.assertEqual(window.windowTitle(), "QuadSens")
-        for name in ("mouse_panel", "driver_panel", "driver_strip", "setup_dialog"):
+        for name in ("driver_panel", "driver_strip", "setup_dialog"):
             self.assertFalse(hasattr(window, name), name)
         self.assertEqual([a.text() for a in window.menuBar().actions()],
                          ["&File", "View", "&Help"])
-        self.assertEqual(len(window.steps_bar.chips), 4)
         self.assertEqual([chip.text() for chip in window.steps_bar.chips], [
-            "▶ 1 Get values", "○ 2 RawAccel folder", "○ 3 Preview", "○ 4 Apply"])
-        self.assertIn("Import a values file", window.calibration_panel.message.text())
+            "○ 1 Start mouse", "○ 2 Neutral", "○ 3 Calibrate", "▶ 4 Use result",
+            "○ 5 Apply"])
+        self.assertEqual(window.mouse_panel.accessibleName(), "Virtual mouse")
+        self.assertEqual(window.mouse_panel.status_label.text(), "Stopped")
+        self.assertEqual(window.mouse_panel.toggle_button.text(), "&Start virtual mouse")
+        self.assertTrue(window.mouse_panel.log_box.isHidden())       # collapsed
+        self.assertIn("import a values file", window.calibration_panel.message.text())
         self.assertIn("forgets its settings", window.rawaccel_panel.boot_label.text())
         self.assertFalse(window.rawaccel_panel.apply_button.isEnabled())
         self.assertIn("Choose the RawAccel folder", window.rawaccel_panel.state_label.text())
-        hint = window.minimumSizeHint()
-        self.assertLessEqual((hint.width() <= 760, hint.height() <= 560), (True, True), hint)
+        # Small windows scroll, so the minimum stays small whatever the cards need.
+        self.assertEqual((window.minimumWidth(), window.minimumHeight()), (760, 520))
+        self.assertIs(window.centralWidget(), window.scroll)
+        self.assertTrue(window.scroll.widgetResizable())
+        content = window.scroll.widget().minimumSizeHint()
+        self.assertLessEqual(content.width(), 760 - 16, content)     # no sideways scrolling
+        self.assertLessEqual(content.height(), 720 - 30, content)    # fits the default size
 
     @needs_fake_writer
     def test_walk_through_import_folder_preview_apply(self) -> None:
         window = self.make(choose=False)
         panel = window.rawaccel_panel
-        self.assertEqual(self.statuses(window), "▶○○○")
-        self.assertFalse(window.steps_bar.next_button.isEnabled())   # nothing to take yet
+        # usbip-win2 is not installed: the steps start at the values, not at the mouse.
+        self.assertEqual(self.statuses(window), "○○○▶○")
+        self.assertEqual(window.steps_bar.next_button.text(), "Import values…")
+        self.assertTrue(window.steps_bar.next_button.isEnabled())
+        self.assertIn("Import a values file", window.steps_bar.next_label.text())
         self.assertTrue(window.import_values(str(self.values_path)))
         self.assertEqual(panel.values(), VALUES)                      # filled at once
         self.assertEqual(window.calibration_panel.diagram.scalars(), VALUES)
-        self.assertEqual(self.statuses(window), "✓▶○○")
+        self.assertEqual(self.statuses(window), "✓✓✓✓▶")
         self.assertEqual(window.steps_bar.next_button.text(), "Choose folder…")
         self.assertTrue(panel.choose_button.property("primary"))
 
         panel.choose_folder(str(self.folder))
-        self.assertEqual(self.statuses(window), "✓✓✓▶")
+        self.assertEqual(self.statuses(window), "✓✓✓✓▶")
+        self.assertFalse(panel.choose_button.property("primary"))
+        self.assertTrue(panel.apply_button.property("primary"))
         self.assertEqual(panel.version_label.text(), "settings of RawAccel 1.7.1 (1.7 names)")
         self.assertEqual([label.text() for label in panel.setting_labels],
                          ["Output DPI", "Y/X ratio", "L/R ratio", "U/D ratio"])
@@ -136,8 +216,9 @@ class WindowsWindowTest(unittest.TestCase):
 
         window.steps_bar.next_button.click()
         self.wait(window)
-        self.assertEqual(self.statuses(window), "✓✓✓✓")
-        self.assertIn("All four steps are done", window.steps_bar.next_label.text())
+        self.assertEqual(self.statuses(window), "✓✓✓✓✓")
+        self.assertIn("All steps are done", window.steps_bar.next_label.text())
+        self.assertEqual(self.driver.calls, [])                       # usbip.exe never ran
         self.assertTrue(self.file_values().is_close(Four(1011.0, 0.995054, 0.980218, 0.99006)))
         self.assertTrue(panel.message.text().startswith("✓ The new values are in settings.json"))
         self.assertIn("RawAccel has loaded the new settings", panel.message.text())
@@ -245,8 +326,9 @@ class WindowsWindowTest(unittest.TestCase):
         self.assertTrue(panel.message.is_error)
         self.assertIn("does not guess", panel.message.text())
         self.assertFalse(panel.apply_button.isEnabled())
-        self.assertEqual(self.statuses(window)[1], "▶")
+        self.assertEqual(self.statuses(window), "✓✓✓✓▶")
         self.assertIn("does not guess", window.steps_bar.next_label.text())
+        self.assertEqual(window.steps_bar.next_button.text(), "Choose folder…")
 
         empty = self.tmp / "Empty"
         empty.mkdir()
@@ -353,8 +435,219 @@ class WindowsWindowTest(unittest.TestCase):
         window.info_box.close()
         window.steps_action.trigger()
         assert window.info_box is not None
-        self.assertIn("only applies values", window.info_box.text())
+        self.assertIn("Start the virtual mouse", window.info_box.text())
+        self.assertIn("Without usbip-win2", window.info_box.text())
         window.info_box.close()
+
+
+class VirtualMouseWindowTest(WindowCase):
+    """The virtual mouse in the window: usbip-win2 is the fake driver."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Without writer.exe the settings are written at once, also on Windows.
+        (self.folder / "writer.exe").unlink()
+
+    def commands(self) -> list[str]:
+        return self.driver.commands()
+
+    def test_strip_says_what_is_missing_and_opens_the_releases_page(self) -> None:
+        window = self.make()
+        strip = window.usbip_strip
+        self.assertFalse(strip.found)
+        self.assertEqual((strip.mark.text(), strip.headline.text()),
+                         ("✕", "usbip-win2 is not installed"))
+        self.assertIn("administrator rights", strip.detail.text())
+        self.assertIn("restarts the USB hubs", strip.detail.text())
+        self.assertIn("still import or type", strip.detail.text())
+        self.assertIn("needs attention", strip.accessibleName())
+        self.assertFalse(strip.get_button.isHidden())
+        strip.get_button.click()
+        self.assertEqual(window.opened, [usbip_client.RELEASES_URL])
+        self.assertTrue(usbip_client.RELEASES_URL.startswith("https://github.com/"))
+        self.assertEqual(self.commands(), [])            # nothing was run, nothing fetched
+        self.assertEqual(self.statuses(window), "○✓○▶○")  # the mouse steps are set aside
+
+        self.tool = TOOL                                  # the user installed it
+        strip.recheck_button.click()
+        self.assertTrue(strip.found)
+        self.assertEqual((strip.mark.text(), strip.headline.text()),
+                         ("✓", "USB/IP driver found (usbip-win2 0.9.7.7)"))
+        self.assertTrue(strip.get_button.isHidden())
+        self.assertTrue(strip.detail.isHidden())
+        self.assertIn("passed", strip.accessibleName())
+        self.assertEqual(self.statuses(window), "▶✓○○○")
+        self.assertEqual(window.steps_bar.next_button.text(), "Start virtual mouse")
+        self.assertTrue(window.mouse_panel.toggle_button.property("primary"))
+
+    def test_start_attach_calibrate_use_apply_stop(self) -> None:
+        window = self.make(tool=TOOL)
+        panel, mouse_panel = window.rawaccel_panel, window.mouse_panel
+        window.steps_bar.next_button.click()                       # step 1
+        mouse = mouse_panel.mouse()
+        assert mouse is not None
+        self.assertTrue(self.until(window, lambda: mouse.state == usbip_mouse.ATTACHED
+                                   and not mouse.busy))
+        self.until(window, lambda: True, 0.05)
+        self.assertEqual(usbip_server.VirtualMouseServer.HOST, "127.0.0.1")
+        attach = [c for c in self.commands() if "attach" in c]
+        self.assertEqual(len(attach), 1)
+        self.assertTrue(attach[0].endswith("attach -r 127.0.0.1 -b 1-1 --once --terse"))
+        self.assertIn("Attached: Windows sees the device (USB/IP port 3, 1B1C:",
+                      mouse_panel.status_label.text())
+        self.assertEqual(mouse_panel.toggle_button.text(), "&Stop virtual mouse")
+        self.assertFalse(mouse_panel.pid_combo.isEnabled())
+        self.assertTrue(mouse_panel.message.isHidden())
+        # RawAccel holds its own values already, so step 2 is done.
+        self.assertEqual(self.statuses(window), "✓✓▶○○")
+        self.assertEqual(window.steps_bar.next_button.text(), "Waiting for the result")
+        self.assertFalse(window.steps_bar.next_button.isEnabled())
+
+        self.calibrate(VALUES)                                      # step 3, in the game
+        self.assertTrue(self.until(window, lambda: mouse_panel.writes.scalars() is not None))
+        self.assertIn("In use", mouse_panel.status_label.text())
+        self.assertEqual(window.calibration_panel.emulator_labels["x_pos"].text(), "1.011000")
+        self.assertEqual(window.calibration_panel.emulator_labels["y_neg"].text(), "0.996000")
+        self.assertEqual(window.calibration_panel.enabled_label.text(), "yes")
+        self.assertIn("DIRECTIONAL WRITE", mouse_panel.log_view.toPlainText())
+        self.assertIn("switched on", mouse_panel.summary_label.text())
+        self.assertEqual(self.statuses(window), "✓✓✓▶○")
+        self.assertEqual(window.steps_bar.next_button.text(), "Use result")
+        self.assertIn("values the game sent to the virtual mouse",
+                      window.calibration_panel.message.text())
+
+        window.steps_bar.next_button.click()                        # step 4
+        self.assertTrue(panel.values().is_close(VALUES, 1e-6))
+        self.assertEqual(self.statuses(window), "✓✓✓✓▶")
+        window.steps_bar.next_button.click()                        # step 5
+        self.wait(window)
+        self.assertEqual(self.statuses(window), "✓✓✓✓✓")
+        self.assertTrue(self.file_values().is_close(
+            Four(1011.0, 0.995054, 0.980218, 0.99006), 1e-4))
+
+        mouse_panel.toggle_button.click()                           # stop
+        self.assertEqual(mouse.state, usbip_mouse.STOPPED)
+        self.assertEqual(mouse_panel.status_label.text(), "Stopped")
+        self.assertEqual(mouse_panel.toggle_button.text(), "&Start virtual mouse")
+        detach = [c for c in self.commands() if "detach" in c]
+        self.assertEqual(detach, ["-t %d detach -p 3" % mouse.server.port]
+                         if detach[0].startswith("-t") else ["detach -p 3"])
+        self.assertFalse(any(" -a" in c or "--all" in c for c in self.commands()))
+        self.assertIsNone(self.driver.client)
+        self.assertEqual(self.statuses(window), "✓✓✓✓✓")           # the result stays
+
+    def test_old_multipliers_are_taken_out_before_calibrating(self) -> None:
+        first = self.make(tool=TOOL)
+        first.rawaccel_panel.set_values(VALUES)
+        first.rawaccel_panel.apply_button.click()
+        self.wait(first)
+        first.close()
+
+        window = self.make(tool=TOOL)                # the next day
+        self.assertEqual(self.statuses(window), "▶○○○○")
+        self.started(window)
+        self.assertEqual(self.statuses(window), "✓▶○○○")
+        self.assertEqual(window.steps_bar.next_button.text(), "Restore original values")
+        self.assertTrue(window.rawaccel_panel.restore_button.property("primary"))
+        window.steps_bar.next_button.click()
+        self.wait(window)
+        self.assertEqual(self.file_values(), Four(1000.0, 1.0, 1.0, 1.0))
+        self.assertEqual(self.statuses(window), "✓✓▶○○")
+        self.calibrate(Scalars(1.02, 0.98, 1.0, 1.0))
+        self.assertTrue(self.until(
+            window, lambda: window.steps_bar.next_button.text() == "Use result"))
+
+    def test_closing_the_window_detaches_our_port_and_stops_serving(self) -> None:
+        window = self.make(tool=TOOL)
+        mouse = self.started(window)
+        self.assertEqual(mouse.state, usbip_mouse.ATTACHED)
+        assert self.driver.client is not None
+        self.driver.client.submit(usbip_server.DIR_IN, 1, 64)       # a waiting request
+        port = mouse.server.port
+        window.close()
+        self.assertFalse(mouse.running)
+        self.assertIsNone(self.driver.client)
+        self.assertEqual(len([c for c in self.commands() if c.endswith("detach -p 3")]), 1)
+        self.assertFalse(any(" -a" in c for c in self.commands()))
+        with self.assertRaises(OSError):                             # nobody listens any more
+            socket.create_connection(("127.0.0.1", port), timeout=1).close()
+        window.shutdown()                                            # twice does no harm
+        self.assertEqual(len([c for c in self.commands() if "detach" in c]), 1)
+
+    def test_closing_a_window_that_never_started_the_mouse_runs_nothing(self) -> None:
+        window = self.make(tool=TOOL)
+        window.close()
+        self.assertEqual(self.commands(), ["--version"])
+
+    def test_refused_attach_shows_the_command_and_offers_no_elevation(self) -> None:
+        window = self.make(tool=TOOL)
+        self.driver.attach_error = "error: Access is denied."
+        mouse = self.started(window)
+        panel = window.mouse_panel
+        self.assertEqual(mouse.state, usbip_mouse.SERVING)
+        self.assertEqual(panel.status_label.text(),
+                         "Serving on 127.0.0.1:%d, waiting for attach" % mouse.server.port)
+        self.assertTrue(panel.message.is_error)
+        self.assertIn("console as administrator", panel.message.text())
+        self.assertIn("attach -r 127.0.0.1 -b 1-1", panel.message.text())
+        self.assertEqual(self.statuses(window)[0], "✓")     # the server does run
+        self.assertEqual([b.text() for b in panel.findChildren(QtWidgets.QAbstractButton)
+                          if "administrator" in b.text().lower()], [])
+        self.assertIn("USBip app", panel.message.text())    # the manual way, as a fallback
+        self.assertEqual(len([c for c in self.commands() if "attach" in c]), 1)
+
+    def test_attach_with_the_usbip_app_is_followed_and_not_undone_by_us(self) -> None:
+        window = self.make()                                 # usbip.exe was not found
+        mouse = self.started(window)
+        panel = window.mouse_panel
+        self.assertIn("waiting for attach", panel.status_label.text())
+        self.assertIn("open the USBip app", panel.message.text())
+        outside = usbip_server.Client("127.0.0.1", mouse.server.port)
+        self.addCleanup(outside.close)
+        self.assertEqual(outside.import_device(), 0)
+        self.assertTrue(self.until(window, lambda: mouse.state == usbip_mouse.ATTACHED
+                                   and panel.message.isHidden()))
+        self.assertEqual(panel.status_label.text(),
+                         "Attached: Windows sees the device (attached outside QuadSens)")
+        self.driver.client = outside                         # the game talks through it
+        self.calibrate(VALUES)
+        self.assertTrue(self.until(
+            window, lambda: window.steps_bar.next_button.text() == "Use result"))
+        self.driver.client = None
+        panel.toggle_button.click()
+        self.assertEqual(self.commands(), [])                # nothing detached by us
+        self.assertEqual(panel.status_label.text(), "Stopped")
+        self.assertFalse(panel.message.is_error)
+        self.assertIn("disappears on the Windows side", panel.message.text())
+
+    def test_port_in_use_is_said_in_the_card(self) -> None:
+        blocker = socket.socket()
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        self.addCleanup(blocker.close)
+        window = self.make(tool=TOOL, port=blocker.getsockname()[1])
+        window.steps_bar.next_button.click()
+        panel = window.mouse_panel
+        self.until(window, lambda: True, 0.05)
+        self.assertEqual(panel.status_label.text(), "Stopped after an error")
+        self.assertTrue(panel.message.is_error)
+        self.assertIn("in use by another program", panel.message.text())
+        self.assertEqual(panel.toggle_button.text(), "&Start virtual mouse")
+        self.assertTrue(panel.toggle_button.isEnabled())
+        self.assertEqual(self.statuses(window)[0], "▶")
+        self.assertFalse(any("attach" in c for c in self.commands()))
+
+    def test_started_without_usbip_win2_it_serves_and_says_so(self) -> None:
+        window = self.make()
+        mouse = self.started(window)
+        panel = window.mouse_panel
+        self.assertEqual(mouse.state, usbip_mouse.SERVING)
+        self.assertIn("was not found", panel.message.text())
+        self.assertFalse(panel.message.is_error)
+        self.assertEqual(self.commands(), [])
+        window.close()
+        self.assertFalse(mouse.running)
+        self.assertEqual(self.commands(), [])
 
 
 class ImportCleanlinessTest(unittest.TestCase):
@@ -362,10 +655,17 @@ class ImportCleanlinessTest(unittest.TestCase):
 
     # quadsens.persist is imported for an enum the step logic shares; it has no
     # POSIX-only import and runs nothing at import time.
-    LINUX_ONLY = ("quadsens.emulator", "quadsens.driver", "quadsens.driver_setup",
+    # The protocol handler (quadsens.emulator) and the card of the virtual mouse
+    # are shared with Windows since the USB/IP server; what talks to /dev/uhid
+    # there is inside functions that Windows never calls. The driver side
+    # (yeetmouse, pkexec, the installer, their hints and widgets) stays out.
+    LINUX_ONLY = ("quadsens.driver", "quadsens.driver_setup",
                   "quadsens.hints", "quadsens.ui.main_window",
-                  "quadsens.ui.mouse_panel", "quadsens.ui.driver_panel",
+                  "quadsens.ui.driver_panel",
                   "quadsens.ui.driver_strip", "quadsens.ui.setup_dialog")
+    SHARED = ("quadsens.emulator", "quadsens.uhid_text", "quadsens.ui.mouse_panel",
+              "quadsens.ui.usbip_panel", "quadsens.usbip_client", "quadsens.usbip_mouse",
+              "quadsens.usbip_server")
     POSIX_ONLY = ("fcntl", "termios", "pwd", "grp", "resource", "pty", "tty")
 
     def loaded(self, code: str, platform: str) -> set[str]:
@@ -383,6 +683,7 @@ class ImportCleanlinessTest(unittest.TestCase):
         self.assertIn("quadsens.ui.windows_window", modules)
         self.assertIn("quadsens.ui.rawaccel_panel", modules)
         self.assertEqual(sorted(modules & set(self.LINUX_ONLY)), [])
+        self.assertEqual(sorted(set(self.SHARED) - modules), [])
         # None of the modules on this path may call what only POSIX has. (Looking
         # at sys.modules for fcntl or pwd would prove nothing here: on Linux the
         # standard library loads those itself.)
@@ -390,7 +691,8 @@ class ImportCleanlinessTest(unittest.TestCase):
                               "uname", "fork", "chown", "mkfifo", "O_NOFOLLOW", "getpwuid")
         offenders = []
         for name in sorted(modules):
-            if not name.startswith("quadsens") or name == "quadsens.persist":
+            if not name.startswith("quadsens") or name in ("quadsens.persist",
+                                                           "quadsens.emulator"):
                 continue
             path = ROOT / (name.replace(".", "/") + ".py")
             if not path.exists():
@@ -399,6 +701,25 @@ class ImportCleanlinessTest(unittest.TestCase):
             offenders += [f"{name}: {word}" for word in missing_on_windows
                           if f".{word}" in source]
         self.assertEqual(offenders, [])
+
+    def test_the_shared_protocol_handler_keeps_uhid_inside_functions(self) -> None:
+        """quadsens.emulator is imported on Windows; /dev/uhid must stay behind calls."""
+        import ast
+        tree = ast.parse((ROOT / "quadsens" / "emulator.py").read_text(encoding="utf-8"))
+        offenders = []
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom)):
+                continue
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Call):
+                    name = getattr(inner.func, "attr", getattr(inner.func, "id", ""))
+                    if name in ("open", "ioctl", "geteuid", "getuid", "getgroups"):
+                        offenders.append(f"line {inner.lineno}: {name}")
+        self.assertEqual(offenders, [])
+        for module in ("usbip_server", "usbip_client", "usbip_mouse"):
+            source = (ROOT / "quadsens" / (module + ".py")).read_text(encoding="utf-8")
+            for word in ("pkexec", "yeetmouse", "PySide", "PyQt", ".ui."):
+                self.assertNotIn(word, source, module)
 
     def test_no_posix_only_import_at_module_level_anywhere(self) -> None:
         import ast

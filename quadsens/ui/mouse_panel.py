@@ -15,7 +15,7 @@ from ..emulator import (
     format_entry,
     summarize_entry,
 )
-from ..hints import UHID_OK, uhid_short
+from ..uhid_text import UHID_OK, uhid_short
 from .qt import QtCore, QtGui, QtWidgets, Signal
 from .status import (
     SPACE_M,
@@ -102,7 +102,7 @@ class MousePanel(Card):
         self.pid_combo.setToolTip("USB product id the virtual mouse reports. "
                                   "Can only be changed while it is stopped.")
         self.pid_combo.setAccessibleDescription(self.pid_combo.toolTip())
-        pid_label = QtWidgets.QLabel("&Product ID:")
+        self.pid_label = pid_label = QtWidgets.QLabel("&Product ID:")
         pid_label.setBuddy(self.pid_combo)
 
         self.toggle_button = QtWidgets.QPushButton("&Start virtual mouse")

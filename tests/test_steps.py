@@ -17,11 +17,16 @@ from quadsens.model import Scalars, format_deviation
 from quadsens.persist import SaveState
 from quadsens.steps import (
     ACTIONS,
+    FIX_FOLDER,
+    FIX_IMPORT,
     FlowState,
     Status,
     Step,
+    WinFlowState,
+    WinStep,
     current_step,
     derive,
+    derive_windows,
     done_steps,
     is_unity,
 )
@@ -178,6 +183,111 @@ class ResultTest(unittest.TestCase):
         enabled = {"t": 0.0, "cmd": "SET", "id": P_DIR_SENS_ENABLED, "value": 1,
                    "highlight": "raw text"}
         self.assertIn("switched on", summarize_entry(enabled))
+
+
+class WindowsStepsTest(unittest.TestCase):
+    """The five steps on Windows, with and without usbip-win2."""
+
+    READY = WinFlowState(folder_ok=True, neutral=True)
+
+    def marks(self, state: WinFlowState) -> str:
+        return "".join(info.marker for info in derive_windows(state))
+
+    def current(self, state: WinFlowState):
+        return current_step(derive_windows(state))
+
+    def test_the_whole_way_with_the_virtual_mouse(self) -> None:
+        self.assertEqual([info.chip() for info in derive_windows(WinFlowState())], [
+            "▶ 1 Start mouse", "○ 2 Neutral", "○ 3 Calibrate", "○ 4 Use result", "○ 5 Apply"])
+        self.assertEqual(self.current(WinFlowState()).action, "Start virtual mouse")
+        running = replace(self.READY, mouse_running=True)
+        self.assertEqual(self.marks(running), "✓✓▶○○")
+        self.assertEqual(self.current(running).action, "")      # happens in the game
+        old = replace(running, result_available=True)           # a result from earlier
+        self.assertEqual(self.marks(old), "✓✓▶○○")
+        new = replace(old, result_is_new=True)
+        self.assertEqual(self.marks(new), "✓✓✓▶○")
+        self.assertEqual(self.current(new).action, "Use result")
+        self.assertEqual(self.current(new).blocked, "")
+        taken = replace(new, values_ready=True)
+        self.assertEqual(self.marks(taken), "✓✓✓✓▶")
+        self.assertEqual(self.current(taken).action, "Apply")
+        applied = replace(taken, applied=True, neutral=False)
+        self.assertEqual(self.marks(applied), "✓✓✓✓✓")
+        self.assertIsNone(self.current(applied))
+
+    def test_earlier_multipliers_must_go_before_calibrating(self) -> None:
+        state = WinFlowState(mouse_running=True, folder_ok=True, neutral=False)
+        self.assertEqual(self.marks(state), "✓▶○○○")
+        info = self.current(state)
+        self.assertEqual((info.step, info.action, info.blocked),
+                         (WinStep.RESET, "Restore original values", ""))
+        # A result that arrives while the old multipliers are still in is new all
+        # the same; the step row then moves on.
+        self.assertEqual(self.marks(replace(state, result_available=True,
+                                            result_is_new=True)), "✓✓✓▶○")
+
+    def test_no_folder_blocks_reset_and_apply_with_a_way_out(self) -> None:
+        state = WinFlowState(mouse_running=True)
+        info = self.current(state)
+        self.assertEqual((info.step, info.fix), (WinStep.RESET, FIX_FOLDER))
+        self.assertEqual(info.blocked, "Choose the RawAccel folder first.")
+        broken = WinFlowState(mouse_running=True, folder_problem="This file is not understood.")
+        self.assertEqual(self.current(broken).blocked, "This file is not understood.")
+        ready = WinFlowState(values_ready=True)
+        info = self.current(ready)
+        self.assertEqual((info.step, info.fix), (WinStep.APPLY, FIX_FOLDER))
+        self.assertEqual(self.marks(ready), "✓✓✓✓▶")
+        # A folder alone is never "applied".
+        self.assertEqual(self.marks(WinFlowState(values_ready=True, applied=True)), "✓✓✓✓▶")
+
+    def test_without_usbip_win2_the_import_route_is_offered(self) -> None:
+        missing = WinFlowState(mouse_possible=False)
+        self.assertEqual(self.marks(missing), "○○○▶○")
+        info = self.current(missing)
+        self.assertEqual((info.step, info.fix), (WinStep.USE, FIX_IMPORT))
+        self.assertIn("Import a values file", info.blocked)
+        self.assertIn("usbip-win2", derive_windows(missing)[0].detail)
+        with_file = replace(missing, result_available=True)     # an old result file
+        self.assertEqual(self.current(with_file).action, "Use result")
+        self.assertEqual(self.current(with_file).blocked, "")
+        typed = replace(missing, values_ready=True)
+        self.assertEqual(self.marks(typed), "✓✓✓✓▶")
+        self.assertEqual(self.current(typed).fix, FIX_FOLDER)
+        done = replace(typed, folder_ok=True, applied=True)
+        self.assertEqual(self.marks(done), "✓✓✓✓✓")
+        # The server can run without the driver (somebody attaches by hand).
+        self.assertEqual(self.marks(replace(missing, mouse_running=True)), "✓▶○○○")
+
+    def test_every_combination_gives_one_consistent_row(self) -> None:
+        import itertools
+        fields = ("mouse_running", "mouse_possible", "folder_ok", "neutral",
+                  "result_available", "result_is_new", "values_ready", "applied")
+        for bits in itertools.product((False, True), repeat=len(fields)):
+            state = WinFlowState(**dict(zip(fields, bits)))
+            if state.result_is_new and not state.result_available:
+                continue
+            infos = derive_windows(state)
+            self.assertEqual([info.step for info in infos], list(WinStep))
+            currents = [info for info in infos if info.status is Status.CURRENT]
+            self.assertLessEqual(len(currents), 1, state)
+            if not currents:
+                self.assertTrue(all(info.status is Status.DONE for info in infos), state)
+                self.assertTrue(state.applied and state.folder_ok and state.values_ready)
+            for info in infos:
+                self.assertTrue(info.detail, state)
+                self.assertEqual(bool(info.fix), bool(info.blocked), (state, info))
+                if info.status is Status.DONE:
+                    self.assertEqual(info.blocked, "", state)
+            # Nothing before the current step is left open, except what is set
+            # aside because usbip-win2 is missing.
+            if currents and state.mouse_possible:
+                before = infos[:infos.index(currents[0])]
+                self.assertTrue(all(info.status is Status.DONE for info in before), state)
+            # Applying is always reachable: values plus folder is enough.
+            if state.values_ready and state.folder_ok and not state.applied:
+                self.assertEqual((currents[0].step, currents[0].blocked),
+                                 (WinStep.APPLY, ""), state)
 
 
 if __name__ == "__main__":

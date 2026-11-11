@@ -9,6 +9,7 @@ Usage: python3 tools/make_screenshot.py [--theme quadsens|system] [--dark]
        python3 tools/make_screenshot.py [--theme ...] [--dark] --setup OUTPUT.png
        python3 tools/make_screenshot.py [--theme ...] [--dark] --checks DIRECTORY
        python3 tools/make_screenshot.py [--theme ...] [--dark] --windows OUTPUT.png
+       python3 tools/make_screenshot.py [--theme ...] --windows-missing OUTPUT.png
 
 Uses a temp directory in place of sysfs and of the config file, a made-up
 calibration file and a stand-in for yeetmousectl. It does not create the uhid
@@ -40,10 +41,12 @@ fixable, log in again, prerequisites missing) into DIRECTORY, each also at the
 minimum window size. Without DIRECTORY it writes only the fixable state, to
 docs/screenshot-driver-check.png.
 
---windows renders the window as it is composed on Windows (values in, RawAccel
-settings out), with a made-up RawAccel folder and an imported values file,
-before Apply. Default output: docs/screenshot-windows.png. Rendered on Linux;
-it shows the layout, not Windows itself.
+--windows renders the window as it is composed on Windows, with a made-up
+RawAccel folder and a stand-in for usbip-win2: the virtual mouse attached and
+a calibration captured from it, before Apply. Default output:
+docs/screenshot-windows.png. --windows-missing renders the same window when
+usbip-win2 is not installed and the values come from an imported file.
+Rendered on Linux; both show the layout, not Windows itself.
 
 The calibration data is made up but consistent: the four multipliers are the
 1-2-1 weighted averages of the eight measured values, a few percent around 1.
@@ -456,10 +459,49 @@ def check_renders(directory: Path | None, mode: str) -> None:
             window.close()
 
 
-def windows_render(output: Path, mode: str, size: tuple[int, int] = (900, 640)) -> None:
-    """The Windows composition with fixture data: values imported, preview shown."""
+class _DemoUsbip:
+    """Stands in for usbip.exe in the renders: attaches the in-process test client."""
+
+    def __init__(self) -> None:
+        self.client = None
+        self.port = 0
+
+    def __call__(self, argv: list[str], _timeout: float) -> tuple[int, str]:
+        from quadsens.usbip_server import Client
+        args = argv[1:]
+        if args[:1] == ["-t"]:
+            self.port, args = int(args[1]), args[2:]
+        if args == ["--version"]:
+            return 0, "0.9.7.7\n"
+        if args[:1] == ["attach"] and "--stop" not in args:
+            self.client = Client("127.0.0.1", self.port)
+            self.client.import_device(args[args.index("-b") + 1])
+            return 0, "3\n"
+        if args[:1] == ["detach"] and self.client is not None:
+            self.client.close()
+            self.client = None
+        return 0, ""
+
+    def write(self, prop: int, payload: bytes) -> None:
+        from quadsens import usbip_server
+        request = bytes([0, 1, 0, emulator.CMD_SET]) + struct.pack("<H", prop) + payload
+        self.client.submit(usbip_server.DIR_OUT, 1, 64, data=request.ljust(64, b"\0"))
+        self.client.reply()
+
+
+def windows_render(output: Path, mode: str, size: tuple[int, int] = (900, 720),
+                   missing: bool = False) -> None:
+    """The Windows composition with fixture data.
+
+    Default: usbip-win2 found, the virtual mouse attached, a calibration
+    captured from it and taken as multipliers, before Apply. With ``missing``:
+    usbip-win2 is not installed and the values come from an imported file.
+    """
     from quadsens import values_file
     from quadsens.ui.windows_window import WindowsMainWindow
+    from quadsens.usbip_client import UsbipClient
+    from quadsens.usbip_mouse import VirtualMouse
+    from quadsens.usbip_server import VirtualMouseServer
     app = QtWidgets.QApplication.instance()
     with tempfile.TemporaryDirectory(prefix="quadsens-demo-") as tmp:
         folder = Path(tmp, "RawAccel")
@@ -470,39 +512,59 @@ def windows_render(output: Path, mode: str, size: tuple[int, int] = (900, 640)) 
         (folder / "writer.exe").chmod(0o755)
         demo = demo_calibration()
         scalars = demo["firmwareScalars"]
+        four = Scalars(scalars["XPos"], scalars["XNeg"], scalars["YPos"], scalars["YNeg"])
         values = Path(tmp, "multipliers.quadsens.json")
-        values.write_text(values_file.dump(
-            Scalars(scalars["XPos"], scalars["XNeg"], scalars["YPos"], scalars["YNeg"]),
-            tuple(demo["directionalScalars"]), "demo"))
+        values.write_text(values_file.dump(four, tuple(demo["directionalScalars"]), "demo"))
         settings = QtCore.QSettings(str(Path(tmp, "settings.ini")),
                                     QtCore.QSettings.Format.IniFormat)
         settings.setValue("ui/theme", mode)
-        window = WindowsMainWindow(settings, str(Path(tmp, "none", "*", "x.json")),
-                                   {"USERPROFILE": str(Path(tmp, "profile")),
-                                    "SystemDrive": str(Path(tmp, "nodrive"))})
+        usbip = _DemoUsbip()
+        tool = None if missing else "C:\\Program Files\\USBip\\usbip.exe"
+
+        def pump(seconds: float = 0.3) -> None:
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 20)
+
+        window = WindowsMainWindow(
+            settings, str(Path(tmp, "none", "*", "x.json")),
+            {"USERPROFILE": str(Path(tmp, "profile")), "SystemDrive": str(Path(tmp, "nodrive"))},
+            find_client=lambda: UsbipClient(tool, usbip),
+            mouse_factory=lambda pid: VirtualMouse(
+                UsbipClient(tool, usbip), VirtualMouseServer(pid, port=0)))
         window.resize(*size)
         window.show()
-        assert window.import_values(str(values))
         window.rawaccel_panel.set_folder("C:\\Tools\\RawAccel", remember=False)
         window.rawaccel_panel.folder = folder      # shown as a Windows path, read from here
         window.rawaccel_panel.reload()
+        if missing:
+            assert window.import_values(str(values))
+            window.calibration_panel.message.show_message(
+                "Showing the imported values. A newer result file replaces them.")
+        else:
+            window.mouse_panel.start()
+            pump(0.5)
+            assert usbip.client is not None, window.mouse_panel.message.text()
+            for prop, value in zip((emulator.P_DIR_SENS_X_POS, emulator.P_DIR_SENS_X_NEG,
+                                    emulator.P_DIR_SENS_Y_POS, emulator.P_DIR_SENS_Y_NEG),
+                                   (four.x_pos, four.x_neg, four.y_pos, four.y_neg)):
+                usbip.write(prop, struct.pack("<f", value))
+            usbip.write(emulator.P_DIR_SENS_ENABLED, struct.pack("<I", 1))
+            pump(0.5)
+            window.rawaccel_panel.use_result()
         window.rawaccel_panel.message.show_message("")
-        window.calibration_panel.message.show_message(
-            "Showing the imported values. A newer result file replaces them.")
-        for _ in range(6):
-            app.processEvents()
+        pump(0.2)
         output.parent.mkdir(parents=True, exist_ok=True)
         window.grab().save(str(output))
-        hint = window.minimumSizeHint()
-        print("windows composition: %s (minimum %dx%d)" % (output, hint.width(),
-                                                           hint.height()))
-        window.rawaccel_panel.apply()
-        deadline = time.monotonic() + 10
-        while window.rawaccel_panel.is_busy() and time.monotonic() < deadline:
-            app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 20)
-        assert window.rawaccel_panel.is_applied(), window.rawaccel_panel.message.text()
+        hint = window.minimumSize()
+        fits = window.scroll.widget().minimumSizeHint()
+        print("windows composition (%s): %s (minimum %dx%d, no scrolling from %dx%d)" % (
+            "usbip-win2 missing" if missing else "attached", output, hint.width(),
+            hint.height(), fits.width(), fits.height()))
         if output.parent != ROOT / "docs":
-            window.grab().save(str(output.with_name(output.stem + "-applied.png")))
+            window.resize(hint)
+            pump(0.2)
+            window.grab().save(str(output.with_name(output.stem + "-minimum.png")))
         window.close()
 
 
@@ -549,7 +611,8 @@ def _options(argv: list[str]) -> tuple[list[str], str, bool]:
 def main(argv: list[str]) -> int:
     argv, mode, dark = _options(argv)
     for flag, render in (("--diagrams", None), ("--gallery", None), ("--setup", None),
-                         ("--checks", None), ("--windows", None)):
+                         ("--checks", None), ("--windows", None),
+                         ("--windows-missing", None)):
         if flag in argv:
             rest = [arg for arg in argv if arg != flag]
             if flag == "--setup" and len(rest) < 2:
@@ -574,6 +637,8 @@ def main(argv: list[str]) -> int:
                 setup_render(Path(rest[1]))
             elif flag == "--windows":
                 windows_render(Path(rest[1]), mode)
+            elif flag == "--windows-missing":
+                windows_render(Path(rest[1]), mode, missing=True)
             elif flag == "--checks":
                 check_renders(Path(rest[1]) if rest[1] else None, mode)
             else:

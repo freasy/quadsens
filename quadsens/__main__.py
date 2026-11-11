@@ -35,8 +35,8 @@ def main(argv: list[str] | None = None) -> int:
 
     window: QtWidgets.QMainWindow
     if platforms.current() == platforms.WINDOWS:
-        # Windows applies values only. Nothing of the Linux chain (virtual mouse,
-        # yeetmouse, pkexec) is imported on this path.
+        # Windows: virtual mouse over USB/IP, values applied to RawAccel. Nothing of
+        # the Linux driver chain (yeetmouse, pkexec, /dev/uhid) is used on this path.
         from .ui.windows_window import WindowsMainWindow
         window = WindowsMainWindow(QtCore.QSettings(), platforms.default_result_glob())
     else:

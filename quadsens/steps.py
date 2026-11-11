@@ -29,12 +29,13 @@ class Step(enum.Enum):
 
 
 class WinStep(enum.Enum):
-    """The shorter flow on Windows: there the values are only applied."""
+    """The flow on Windows: virtual mouse over USB/IP, values applied to RawAccel."""
 
-    VALUES = 1
-    FOLDER = 2
-    PREVIEW = 3
-    APPLY = 4
+    START = 1
+    RESET = 2
+    CALIBRATE = 3
+    USE = 4
+    APPLY = 5
 
 
 class Status(enum.Enum):
@@ -53,9 +54,10 @@ SHORT_TITLES = {
     Step.USE: "Use result",
     Step.APPLY: "Apply",
     Step.SAVE: "Save",
-    WinStep.VALUES: "Get values",
-    WinStep.FOLDER: "RawAccel folder",
-    WinStep.PREVIEW: "Preview",
+    WinStep.START: "Start mouse",
+    WinStep.RESET: "Neutral",
+    WinStep.CALIBRATE: "Calibrate",
+    WinStep.USE: "Use result",
     WinStep.APPLY: "Apply",
 }
 TITLES = {
@@ -65,9 +67,10 @@ TITLES = {
     Step.USE: "Use the result",
     Step.APPLY: "Apply to the driver",
     Step.SAVE: "Save to config",
-    WinStep.VALUES: "Get the four multipliers",
-    WinStep.FOLDER: "Choose the RawAccel folder",
-    WinStep.PREVIEW: "Look at the preview",
+    WinStep.START: "Start the virtual mouse",
+    WinStep.RESET: "Reset RawAccel's directional values to neutral",
+    WinStep.CALIBRATE: "Run the calibration in the game",
+    WinStep.USE: "Use the result",
     WinStep.APPLY: "Apply to RawAccel",
 }
 # Label of the button that carries out a step; CALIBRATE happens in the game.
@@ -77,8 +80,9 @@ ACTIONS = {
     Step.USE: "Use result",
     Step.APPLY: "Apply",
     Step.SAVE: "Save to config",
-    WinStep.VALUES: "Use result",
-    WinStep.FOLDER: "Choose folder…",
+    WinStep.START: "Start virtual mouse",
+    WinStep.RESET: "Restore original values",
+    WinStep.USE: "Use result",
     WinStep.APPLY: "Apply",
 }
 
@@ -234,57 +238,92 @@ def current_step(steps: list[StepInfo]) -> StepInfo | None:
 class WinFlowState:
     """What the Windows steps depend on."""
 
-    values_ready: bool = False       # the multipliers to apply are not all 1.0
-    result_available: bool = False   # a result file or an import could fill them
+    mouse_running: bool = False
+    mouse_possible: bool = True      # usbip-win2 is installed, so the mouse can be attached
     folder_ok: bool = False          # a RawAccel settings file is loaded and understood
     folder_problem: str = ""         # why not, "" if no folder was chosen yet
+    neutral: bool = False            # the file holds the profile's own values (or none yet)
+    result_available: bool = False   # a result file, a capture or an import could fill them
+    result_is_new: bool = False      # ... and it arrived after the mouse start / reset
+    values_ready: bool = False       # the multipliers to apply are not all 1.0
     applied: bool = False            # the settings file holds the new values
 
 
 def derive_windows(state: WinFlowState) -> list[StepInfo]:
-    """The four Windows steps; the first one that is not done is the current one."""
+    """The five Windows steps; the first one that is not done is the current one.
+
+    Without usbip-win2 the virtual mouse cannot be attached. The first three
+    steps are then left aside (shown as pending, never as current) and the
+    flow starts at "Use result", which offers the import instead.
+    """
+    calibrated = state.result_is_new or state.values_ready
     ready = state.values_ready and state.folder_ok
     done = {
-        WinStep.VALUES: state.values_ready,
-        WinStep.FOLDER: state.folder_ok,
-        WinStep.PREVIEW: ready,
+        WinStep.START: state.mouse_running or calibrated,
+        WinStep.RESET: (state.folder_ok and state.neutral) or calibrated,
+        WinStep.CALIBRATE: calibrated,
+        WinStep.USE: state.values_ready,
         WinStep.APPLY: ready and state.applied,
     }
+    skipped: set[WinStep] = set()
+    if not state.mouse_possible and not state.mouse_running:
+        skipped = {step for step in (WinStep.START, WinStep.RESET, WinStep.CALIBRATE)
+                   if not done[step]}
+    need_folder = state.folder_problem or "Choose the RawAccel folder first."
     details = {
-        WinStep.VALUES: ("The four multipliers are set." if state.values_ready
-                         else "Take the newest result, import a values file, or type the "
-                              "four multipliers."),
-        WinStep.FOLDER: ("The RawAccel settings are loaded." if state.folder_ok
-                         else state.folder_problem or "Choose the folder where rawaccel.exe "
-                                                      "and settings.json are."),
-        WinStep.PREVIEW: ("The table shows what changes: current and new." if ready
-                          else "Shows current and new settings once values and folder "
-                               "are there."),
-        WinStep.APPLY: ("RawAccel's settings hold the new values." if done[WinStep.APPLY]
-                        else "Write the new settings and let RawAccel load them."),
+        WinStep.START: (
+            "The virtual mouse is running. Start the game now if it is not open."
+            if state.mouse_running else
+            "Not needed for these values." if done[WinStep.START] else
+            "Needs usbip-win2 (see the line on top). Without it: import or type the values."
+            if not state.mouse_possible else
+            "Start the virtual mouse first, then the game."),
+        WinStep.RESET: (
+            "RawAccel holds its own values: the calibration measures the unscaled mouse."
+            if state.folder_ok and state.neutral else
+            "Not needed for these values." if done[WinStep.RESET] else
+            "Put RawAccel's own values back, so that the calibration is not done on top "
+            "of earlier multipliers."),
+        WinStep.CALIBRATE: (
+            "A new calibration result has arrived." if state.result_is_new else
+            "Using the values that are there." if done[WinStep.CALIBRATE] else
+            "Run the per-direction calibration in the game; the result shows up here."),
+        WinStep.USE: (
+            "The four multipliers are set." if state.values_ready else
+            "Take the four values of the result as multipliers." if state.result_available
+            else "Import a values file (File > Import values) or type the four "
+                 "multipliers."),
+        WinStep.APPLY: (
+            "RawAccel's settings hold the new values." if done[WinStep.APPLY] else
+            "Write the new settings and let RawAccel load them."),
     }
     blocked = {
-        WinStep.VALUES: "" if state.result_available else
-        "There is no result to take; import a values file or type the multipliers.",
-        WinStep.FOLDER: "",
-        WinStep.PREVIEW: "",
-        WinStep.APPLY: "" if state.folder_ok else "Choose the RawAccel folder first.",
+        WinStep.START: "",
+        WinStep.RESET: "" if state.folder_ok else need_folder,
+        WinStep.CALIBRATE: "",
+        WinStep.USE: "" if state.result_available else
+        "There is no result yet. Import a values file or type the four multipliers.",
+        WinStep.APPLY: "" if state.folder_ok else need_folder,
     }
+    fixes = {WinStep.RESET: FIX_FOLDER, WinStep.APPLY: FIX_FOLDER, WinStep.USE: FIX_IMPORT}
     steps: list[StepInfo] = []
     current_given = False
     for step in WinStep:
         if done[step]:
             status = Status.DONE
-        elif not current_given:
-            status, current_given = Status.CURRENT, True
-        else:
+        elif step in skipped or current_given:
             status = Status.PENDING
-        steps.append(StepInfo(step, status, details[step],
-                              "" if done[step] else blocked[step]))
+        else:
+            status, current_given = Status.CURRENT, True
+        reason = "" if done[step] else blocked[step]
+        steps.append(StepInfo(step, status, details[step], reason,
+                              fixes.get(step, "") if reason else ""))
     return steps
 
 
-WIN_ALL_DONE = "All four steps are done: RawAccel's settings hold your multipliers."
+FIX_FOLDER, FIX_IMPORT = "rawaccel-folder", "import-values"
+WIN_ALL_DONE = "All steps are done: RawAccel's settings hold your multipliers."
 FIX_DRIVER = "driver-setup"
-FIX_ACTIONS = {FIX_DRIVER: "Driver setup…"}
+FIX_ACTIONS = {FIX_DRIVER: "Driver setup…", FIX_FOLDER: "Choose folder…",
+               FIX_IMPORT: "Import values…"}
 ALL_DONE = "All six steps are done: the calibration is applied and saved."
