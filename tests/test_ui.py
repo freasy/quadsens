@@ -48,6 +48,7 @@ FIXTURE = Path(__file__).parent / "fixtures" / "ASFSettings.json"
 FAKE_TOOL = Path(__file__).parent / "fake_yeetmousectl.py"
 BRANDS = re.compile(r"purevector|omnisense|corsair|sabre|aimlab", re.IGNORECASE)
 _app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(["test"])
+widths.apply_test_font(_app)
 
 
 def _luminance(color: QtGui.QColor) -> float:
@@ -63,11 +64,8 @@ def _contrast(a: QtGui.QColor, b: QtGui.QColor) -> float:
     return (high + 0.05) / (low + 0.05)
 
 
-# The window has to fit an 800x600 screen. The exact minimum depends on the
-# fonts of the machine (about 660x510 with the fonts it was designed with), so
-# the limit leaves room for wider fonts instead of pinning one machine's value.
-MAX_MIN_WIDTH = 780
-MAX_MIN_HEIGHT = 560
+# The window has to fit an 800x600 screen. Every size assertion goes through
+# widths.assert_fits(), which scales the limit with the fonts of the machine.
 
 
 class FakeSession:
@@ -310,8 +308,7 @@ class MainWindowTest(unittest.TestCase):
         window.show()
         _app.processEvents()
         hint = window.minimumSizeHint()
-        self.assertLessEqual(hint.width(), MAX_MIN_WIDTH, widths.report(window))
-        self.assertLessEqual(hint.height(), MAX_MIN_HEIGHT, widths.report(window))
+        widths.assert_fits(self, hint, widths.LINUX_FIT, window)
         interactive = (QtWidgets.QAbstractButton, QtWidgets.QAbstractSpinBox,
                        QtWidgets.QComboBox, QtWidgets.QLineEdit, QtWidgets.QPlainTextEdit)
         for widget in window.findChildren(QtWidgets.QWidget):
@@ -454,13 +451,12 @@ class MainWindowTest(unittest.TestCase):
         self.assertFalse(panel.accel_editor.isVisible())
         self.assertEqual(panel.accel_toggle.summary(), "Acceleration: Linear, 0.1, 1.3; cap none")
         hint = window.minimumSizeHint()
-        self.assertLessEqual(hint.width(), MAX_MIN_WIDTH, widths.report(window))
-        self.assertLessEqual(hint.height(), MAX_MIN_HEIGHT, widths.report(window))
+        widths.assert_fits(self, hint, widths.LINUX_FIT, window)
         # Opened, the page scrolls instead of pushing the window off the screen.
         panel.accel_toggle.setChecked(True)
         _app.processEvents()
         self.assertTrue(panel.accel_editor.isVisible())
-        self.assertGreater(window.minimumSizeHint().height(), MAX_MIN_HEIGHT)
+        self.assertGreater(window.minimumSizeHint().height(), hint.height() + 100)
         self.assertLessEqual(window.minimumHeight(), 520)
         # The fork's own default is a capped line, and that is what the editor shows.
         editor = panel.accel_editor
@@ -598,14 +594,13 @@ class MainWindowTest(unittest.TestCase):
         window.show()
         _app.processEvents()
         content = window.centralWidget()
+        before = window.minimumSizeHint().width()
         for text in widths.LONG_TEXTS:
             self.assertGreater(widths.fill_dynamic(content, text), 8)
             for _ in range(3):
                 _app.processEvents()
-            self.assertLessEqual(
-                window.minimumSizeHint().width(), MAX_MIN_WIDTH,
-                "%d characters in every dynamic text widened the window\n%s"
-                % (len(text), widths.report(window)))
+            widths.assert_not_wider(self, window, window.minimumSizeHint(), before,
+                                    "%d characters in every dynamic text" % len(text))
 
     # ---- window chrome ------------------------------------------------------
 
@@ -1348,9 +1343,7 @@ class MainWindowTest(unittest.TestCase):
         broken.show()
         for _ in range(5):
             _app.processEvents()
-        hint = broken.minimumSizeHint()
-        self.assertLessEqual(hint.width(), MAX_MIN_WIDTH, hint)
-        self.assertLessEqual(hint.height(), MAX_MIN_HEIGHT, hint)
+        widths.assert_fits(self, broken.minimumSizeHint(), widths.LINUX_FIT, broken)
         broken.close()
 
         # And the busiest good case: applied and saved, with both messages showing.
@@ -1364,9 +1357,7 @@ class MainWindowTest(unittest.TestCase):
         self.wait_idle(window)
         for _ in range(5):
             _app.processEvents()
-        hint = window.minimumSizeHint()
-        self.assertLessEqual(hint.width(), MAX_MIN_WIDTH, hint)
-        self.assertLessEqual(hint.height(), MAX_MIN_HEIGHT, hint)
+        widths.assert_fits(self, window.minimumSizeHint(), widths.LINUX_FIT, window)
 
     # ---- look ---------------------------------------------------------------
 
@@ -1561,7 +1552,7 @@ class MainWindowTest(unittest.TestCase):
         self.assertEqual(_app.styleSheet(), "")
         self.assertNotEqual(self.window_colour(), "#0b0b0d")
         hint = again.minimumSizeHint()  # the plain style fits as well
-        self.assertLessEqual((hint.width(), hint.height()), (720, 520))
+        widths.assert_fits(self, hint, widths.LINUX_FIT, again)
 
         again.theme_actions["quadsens"].trigger()
         self.assertEqual(manager.mode(), "quadsens")
@@ -1735,7 +1726,7 @@ class MainWindowTest(unittest.TestCase):
         self.assertFalse(strip.action_button.isVisible())
         self.assertTrue(strip.details_button.isVisible())
         self.assertTrue(strip.recheck_button.isVisible())
-        self.assertLessEqual(strip.height(), 30)          # about one line of controls
+        widths.assert_fits(self, strip.size(), (None, 30), strip)   # one line of controls
         self.assertTrue(window.steps_bar.next_button.isVisible())
         self.assertIs(window.scroll.widget().layout().itemAt(0).widget(), strip)
         opened: list[str] = []
@@ -1766,7 +1757,7 @@ class MainWindowTest(unittest.TestCase):
         self.assertIn("driver check above", window.steps_bar.next_label.text())
         self.assertTrue(window.driver_panel.apply_button.isEnabled())   # nothing is locked
         hint = window.minimumSizeHint()   # a failing check costs a little height
-        self.assertLessEqual((hint.width() <= 720, hint.height()), (True, 535))
+        widths.assert_fits(self, hint, widths.LINUX_FIT, window)
         # The button opens the setup on the install action and starts nothing.
         strip.action_button.click()
         dialog = window.setup_dialog

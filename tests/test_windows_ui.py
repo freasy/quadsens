@@ -53,6 +53,7 @@ from tests.test_win_tools import GOOD, FakeWindows, make_zip, pin_for, zip_pin
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = Path(__file__).parent / "fixtures"
 _app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(["test"])
+widths.apply_test_font(_app)
 VALUES = Scalars(1.011, 0.991, 1.006, 0.996)
 # The stand-in for writer.exe is a shell script, which only POSIX can start.
 POSIX = os.name == "posix"
@@ -237,12 +238,9 @@ class WindowsWindowTest(WindowCase):
         # everything. The limits are for the font they were set with; a wider
         # font moves them. On failure the message names the widest widgets.
         content = window.scroll.widget()
-        scale = widths.font_scale()
-        self.assertLessEqual(content.minimumSizeHint().width(), (760 - 16) * scale,
-                             widths.report(content))
-        self.assertLessEqual(content.minimumSizeHint().height(),
-                             (windows_window.DEFAULT_SIZE[1] - 30) * scale,
-                             widths.report(content))
+        widths.assert_fits(self, content.minimumSizeHint(),
+                           (widths.WINDOWS_CONTENT_WIDTH, windows_window.DEFAULT_SIZE[1] - 30),
+                           content)
         self.assertLessEqual(windows_window.DEFAULT_SIZE[1], 800)
 
     @needs_fake_writer
@@ -633,49 +631,77 @@ class VirtualMouseWindowTest(WindowCase):
         window.shutdown()                                            # twice does no harm
         self.assertEqual(len([c for c in self.commands() if "detach" in c]), 1)
 
-    def test_long_texts_never_widen_the_window(self) -> None:
+    def walk(self, long: bool) -> tuple[WindowsMainWindow, list[tuple[str, int]]]:
+        """Put texts from outside through the real inputs; the minimum width after each.
+
+        The same steps with the same numbers, once with short names and once
+        with very long ones: a tool path and version, names and a version in
+        the settings file, a folder, a message of usbip.exe, a values file.
+        """
+        def name(short: str, repeated: str, times: int) -> str:
+            return repeated * times if long else short
         window = self.make(tool=TOOL)
         window.show()
-        _app.processEvents()
         content = window.scroll.widget()
-        # The limit of the window, not the width before: numbers in the table
-        # may take a few pixels more or less.
-        limit = (760 - 16) * widths.font_scale()
+        seen: list[tuple[str, int]] = []
+
+        def note(what: str) -> None:
+            for _ in range(3):
+                _app.processEvents()
+            seen.append((what, content.minimumSizeHint().width()))
+
+        self.tool = "C:\\Program Files\\" + name("USBip", "USBip-in-a-long-folder-", 6) \
+            + "\\usbip.exe"
+        self.driver.version = "0.9.7." + name("7", "1234567890", 6)
+        window.usbip_strip.check()
+        note("the version of usbip-win2")
+        deep = self.tmp / ("long" if long else "short")
+        for part in (name("user", "a-very-long-user-name-", 3), "AppData", "Local",
+                     name("x", "a-folder-with-a-long-name-", 3), "RawAccel"):
+            deep = deep / part
+        deep.mkdir(parents=True)
+        data = json.loads((FIXTURES / "rawaccel" / "settings-1.7.1-profiles.json").read_text())
+        data["version"] = "1.7.1" + name("", "-special-build", 8)
+        data["profiles"][0]["name"] = name("default", "profile-with-a-long-name-", 6)
+        (deep / "settings.json").write_text(json.dumps(data, indent=2))
+        window.rawaccel_panel.choose_folder(str(deep))
+        note("the RawAccel folder, version and profile names")
+        self.driver.attach_error = "error: " + name(
+            "no", widths.LONG_SENTENCE + " " + widths.LONG_PATH, 1)
+        self.started(window)
+        note("the message of usbip.exe")
+        values = deep / (name("m", "multipliers-", 8) + ".quadsens.json")
+        values.write_text(values_file.dump(VALUES, None, "0.4.0"))
+        self.assertTrue(window.import_values(str(values)))
+        window.rawaccel_panel.use_result()
+        note("an imported values file")
+        return window, seen
+
+    def test_long_texts_never_widen_the_window(self) -> None:
+        plain, short = self.walk(long=False)
+        plain.close()
+        window, long = self.walk(long=True)
+        content = window.scroll.widget()
+        self.assertIn("1234567890" * 6, window.usbip_strip.headline.text())
+        mouse = window.mouse_panel.mouse()
+        assert mouse is not None
+        self.assertIn("something went wrong", mouse.message)
+        # The same steps with long texts need no more width than with short ones.
+        for (what, with_short), (_what, with_long) in zip(short, long):
+            widths.assert_not_wider(self, content, QtCore.QSize(with_long, 0), with_short,
+                                    "Long text in " + what)
+        # With every table filled the page fits the window at its default size.
+        # (Numbers take what they take; at the smallest window size a wide font
+        # can make the page scroll sideways.)
+        widths.assert_fits(self, content.minimumSizeHint(),
+                           (widths.WINDOWS_DEFAULT_WIDTH, None), content)
+        baseline = content.minimumSizeHint().width()
 
         def check(what: str) -> None:
             for _ in range(3):
                 _app.processEvents()
-            self.assertLessEqual(content.minimumSizeHint().width(), limit,
-                                 "%s widened the window\n%s" % (what, widths.report(content)))
+            widths.assert_not_wider(self, content, content.minimumSizeHint(), baseline, what)
 
-        # Through the real inputs: a long tool path and version, long names and
-        # a long version in the settings file, a long folder, a long message of
-        # usbip.exe, a values file from a long path.
-        self.tool = "C:\\Program Files\\" + "USBip-in-a-long-folder-" * 6 + "\\usbip.exe"
-        self.driver.version = "0.9.7." + "1234567890" * 6
-        window.usbip_strip.check()
-        self.assertIn("1234567890" * 6, window.usbip_strip.headline.text())
-        check("the version of usbip-win2")
-        deep = self.tmp
-        for part in ("a-very-long-user-name-" * 3, "AppData", "Local",
-                     "a-folder-with-a-long-name-" * 3, "RawAccel"):
-            deep = deep / part
-        deep.mkdir(parents=True)
-        data = json.loads((FIXTURES / "rawaccel" / "settings-1.7.1-profiles.json").read_text())
-        data["version"] = "1.7.1-" + "special-build-" * 8
-        data["profiles"][0]["name"] = "profile-with-a-long-name-" * 6
-        (deep / "settings.json").write_text(json.dumps(data, indent=2))
-        window.rawaccel_panel.choose_folder(str(deep))
-        check("the RawAccel folder, version and profile names")
-        self.driver.attach_error = "error: " + widths.LONG_SENTENCE + " " + widths.LONG_PATH
-        mouse = self.started(window)
-        self.assertIn("something went wrong", mouse.message)
-        check("the message of usbip.exe")
-        long_values = deep / ("multipliers-" * 8 + ".quadsens.json")
-        long_values.write_text(values_file.dump(VALUES, None, "0.4.0"))
-        self.assertTrue(window.import_values(str(long_values)))
-        window.rawaccel_panel.use_result()
-        check("an imported values file")
         # Whatever came from outside is in a label that wraps or elides.
         self.assertEqual(widths.plain_labels_with(content, (
             "1234567890", "special-build", "a-very-long", "long-name", "multipliers-",
@@ -1243,9 +1269,9 @@ class AccelEditTest(WindowCase):
         self.assertFalse(panel.accel_editor.isVisible())
         self.assertEqual(panel.accel_label.text(), "Acceleration: off")
         content = window.scroll.widget()
-        self.assertLessEqual(content.minimumSizeHint().height(),
-                             (windows_window.DEFAULT_SIZE[1] - 30) * widths.font_scale(),
-                             widths.report(content))
+        widths.assert_fits(self, content.minimumSizeHint(),
+                           (widths.WINDOWS_CONTENT_WIDTH, windows_window.DEFAULT_SIZE[1] - 30),
+                           content)
         panel.accel_toggle.setChecked(True)
         _app.processEvents()
         editor = panel.accel_editor
