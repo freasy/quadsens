@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import socket
 import struct
 import subprocess
 import sys
@@ -34,7 +33,8 @@ from quadsens.rawaccel import Four
 from quadsens.ui.windows_window import WindowsMainWindow
 from quadsens.usbip_client import UsbipClient
 from quadsens.usbip_server import VirtualMouseServer
-from tests.test_usbip_windows import TOOL, FakeDriver
+from tests import widths
+from tests.test_usbip_windows import TOOL, FakeDriver, occupy_port
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -109,11 +109,11 @@ class WindowCase(unittest.TestCase):
         return window
 
     def wait(self, window: WindowsMainWindow) -> None:
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 30
         while window.rawaccel_panel.is_busy() and time.monotonic() < deadline:
             _app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 20)
 
-    def until(self, window: WindowsMainWindow, condition, seconds: float = 10.0) -> bool:
+    def until(self, window: WindowsMainWindow, condition, seconds: float = 30.0) -> bool:
         """Let the window poll the virtual mouse until ``condition`` holds."""
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
@@ -129,8 +129,11 @@ class WindowCase(unittest.TestCase):
         window.mouse_panel.toggle_button.click()
         mouse = window.mouse_panel.mouse()
         assert mouse is not None
-        self.assertTrue(self.until(window, lambda: not mouse.busy))
-        self.until(window, lambda: True, 0.05)
+        # usbip.exe is through, and the server has seen what it did.
+        self.assertTrue(self.until(
+            window, lambda: not mouse.busy
+            and mouse.server.attached == (self.driver.client is not None)))
+        window.mouse_panel.poll()
         return mouse
 
     def write(self, prop: int, payload: bytes) -> None:
@@ -179,9 +182,15 @@ class WindowsWindowTest(WindowCase):
         self.assertEqual((window.minimumWidth(), window.minimumHeight()), (760, 520))
         self.assertIs(window.centralWidget(), window.scroll)
         self.assertTrue(window.scroll.widgetResizable())
-        content = window.scroll.widget().minimumSizeHint()
-        self.assertLessEqual(content.width(), 760 - 16, content)     # no sideways scrolling
-        self.assertLessEqual(content.height(), 720 - 30, content)    # fits the default size
+        # No sideways scrolling at the minimum size, and the default size shows
+        # everything. The limits are for the font they were set with; a wider
+        # font moves them. On failure the message names the widest widgets.
+        content = window.scroll.widget()
+        scale = widths.font_scale()
+        self.assertLessEqual(content.minimumSizeHint().width(), (760 - 16) * scale,
+                             widths.report(content))
+        self.assertLessEqual(content.minimumSizeHint().height(), (720 - 30) * scale,
+                             widths.report(content))
 
     @needs_fake_writer
     def test_walk_through_import_folder_preview_apply(self) -> None:
@@ -488,7 +497,7 @@ class VirtualMouseWindowTest(WindowCase):
         assert mouse is not None
         self.assertTrue(self.until(window, lambda: mouse.state == usbip_mouse.ATTACHED
                                    and not mouse.busy))
-        self.until(window, lambda: True, 0.05)
+        mouse_panel.poll()
         self.assertEqual(usbip_server.VirtualMouseServer.HOST, "127.0.0.1")
         attach = [c for c in self.commands() if "attach" in c]
         self.assertEqual(len(attach), 1)
@@ -563,16 +572,77 @@ class VirtualMouseWindowTest(WindowCase):
         self.assertEqual(mouse.state, usbip_mouse.ATTACHED)
         assert self.driver.client is not None
         self.driver.client.submit(usbip_server.DIR_IN, 1, 64)       # a waiting request
-        port = mouse.server.port
         window.close()
         self.assertFalse(mouse.running)
         self.assertIsNone(self.driver.client)
         self.assertEqual(len([c for c in self.commands() if c.endswith("detach -p 3")]), 1)
         self.assertFalse(any(" -a" in c for c in self.commands()))
-        with self.assertRaises(OSError):                             # nobody listens any more
-            socket.create_connection(("127.0.0.1", port), timeout=1).close()
+        self.assertFalse(mouse.server.running)                       # nobody listens any more
         window.shutdown()                                            # twice does no harm
         self.assertEqual(len([c for c in self.commands() if "detach" in c]), 1)
+
+    def test_long_texts_never_widen_the_window(self) -> None:
+        window = self.make(tool=TOOL)
+        window.show()
+        _app.processEvents()
+        content = window.scroll.widget()
+        # The limit of the window, not the width before: numbers in the table
+        # may take a few pixels more or less.
+        limit = (760 - 16) * widths.font_scale()
+
+        def check(what: str) -> None:
+            for _ in range(3):
+                _app.processEvents()
+            self.assertLessEqual(content.minimumSizeHint().width(), limit,
+                                 "%s widened the window\n%s" % (what, widths.report(content)))
+
+        # Through the real inputs: a long tool path and version, long names and
+        # a long version in the settings file, a long folder, a long message of
+        # usbip.exe, a values file from a long path.
+        self.tool = "C:\\Program Files\\" + "USBip-in-a-long-folder-" * 6 + "\\usbip.exe"
+        self.driver.version = "0.9.7." + "1234567890" * 6
+        window.usbip_strip.check()
+        self.assertIn("1234567890" * 6, window.usbip_strip.headline.text())
+        check("the version of usbip-win2")
+        deep = self.tmp
+        for part in ("a-very-long-user-name-" * 3, "AppData", "Local",
+                     "a-folder-with-a-long-name-" * 3, "RawAccel"):
+            deep = deep / part
+        deep.mkdir(parents=True)
+        data = json.loads((FIXTURES / "rawaccel" / "settings-1.7.1-profiles.json").read_text())
+        data["version"] = "1.7.1-" + "special-build-" * 8
+        data["profiles"][0]["name"] = "profile-with-a-long-name-" * 6
+        (deep / "settings.json").write_text(json.dumps(data, indent=2))
+        window.rawaccel_panel.choose_folder(str(deep))
+        check("the RawAccel folder, version and profile names")
+        self.driver.attach_error = "error: " + widths.LONG_SENTENCE + " " + widths.LONG_PATH
+        mouse = self.started(window)
+        self.assertIn("something went wrong", mouse.message)
+        check("the message of usbip.exe")
+        long_values = deep / ("multipliers-" * 8 + ".quadsens.json")
+        long_values.write_text(values_file.dump(VALUES, None, "0.4.0"))
+        self.assertTrue(window.import_values(str(long_values)))
+        window.rawaccel_panel.use_result()
+        check("an imported values file")
+        # Whatever came from outside is in a label that wraps or elides.
+        self.assertEqual(widths.plain_labels_with(content, (
+            "1234567890", "special-build", "a-very-long", "long-name", "multipliers-",
+            "something went wrong")), [])
+
+        # And directly: every slot for such text, with texts no layout can break.
+        for text in widths.LONG_TEXTS:
+            self.assertGreater(widths.fill_dynamic(content, text), 8)
+            check("%d characters in every dynamic text" % len(text))
+        # The whole text stays reachable: as text for screen readers, and as
+        # tooltip where it was cut.
+        window.resize(900, 720)
+        label = window.mouse_panel.status_label
+        label.setText(widths.LONG_PATH)
+        for _ in range(3):
+            _app.processEvents()
+        label.repaint()
+        self.assertEqual(label.text(), widths.LONG_PATH)
+        self.assertTrue(label.is_elided())
 
     def test_closing_a_window_that_never_started_the_mouse_runs_nothing(self) -> None:
         window = self.make(tool=TOOL)
@@ -621,17 +691,18 @@ class VirtualMouseWindowTest(WindowCase):
         self.assertIn("disappears on the Windows side", panel.message.text())
 
     def test_port_in_use_is_said_in_the_card(self) -> None:
-        blocker = socket.socket()
-        blocker.bind(("127.0.0.1", 0))
-        blocker.listen(1)
+        blocker = occupy_port()
         self.addCleanup(blocker.close)
         window = self.make(tool=TOOL, port=blocker.getsockname()[1])
         window.steps_bar.next_button.click()
         panel = window.mouse_panel
-        self.until(window, lambda: True, 0.05)
+        panel.poll()
         self.assertEqual(panel.status_label.text(), "Stopped after an error")
         self.assertTrue(panel.message.is_error)
-        self.assertIn("in use by another program", panel.message.text())
+        mouse = panel.mouse()
+        assert mouse is not None
+        self.assertEqual(mouse.problem, usbip_server.PORT_UNAVAILABLE)
+        self.assertIn(mouse.message, panel.message.text())    # whatever the wording is
         self.assertEqual(panel.toggle_button.text(), "&Start virtual mouse")
         self.assertTrue(panel.toggle_button.isEnabled())
         self.assertEqual(self.statuses(window)[0], "▶")

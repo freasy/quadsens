@@ -16,7 +16,7 @@ from ..usbip_mouse import VirtualMouse
 from ..usbip_server import format_event
 from .mouse_panel import MousePanel
 from .qt import QtCore, QtWidgets, Signal
-from .status import SPACE_M, SPACE_S, StatusDot, WrapLabel, caption
+from .status import SPACE_M, SPACE_S, ElideLabel, StatusDot, WrapLabel, caption
 from .theme import set_primary
 
 MouseFactory = Callable[[int], VirtualMouse]
@@ -181,7 +181,7 @@ class UsbipCheckStrip(QtWidgets.QFrame):
         self.mark.setFont(font)
         self.mark.setFixedWidth(self.mark.fontMetrics().horizontalAdvance("⚠") + 4)
         self.mark.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.headline = QtWidgets.QLabel()
+        self.headline = ElideLabel()
         bold = self.headline.font()
         bold.setWeight(bold.Weight.DemiBold)
         self.headline.setFont(bold)

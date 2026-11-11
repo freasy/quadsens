@@ -24,6 +24,7 @@ except ImportError:  # pragma: no cover - depends on the environment
     raise unittest.SkipTest("no Qt binding (PySide6) installed") from None
 
 import quadsens
+from tests import widths  # noqa: E402 (needs a Qt binding, checked above)
 from quadsens import about, colors, driver_setup, emulator, hints
 from quadsens.driver import PARAM_NAMES, Driver
 from quadsens.model import Scalars
@@ -309,8 +310,8 @@ class MainWindowTest(unittest.TestCase):
         window.show()
         _app.processEvents()
         hint = window.minimumSizeHint()
-        self.assertLessEqual(hint.width(), MAX_MIN_WIDTH, hint)
-        self.assertLessEqual(hint.height(), MAX_MIN_HEIGHT, hint)
+        self.assertLessEqual(hint.width(), MAX_MIN_WIDTH, widths.report(window))
+        self.assertLessEqual(hint.height(), MAX_MIN_HEIGHT, widths.report(window))
         interactive = (QtWidgets.QAbstractButton, QtWidgets.QAbstractSpinBox,
                        QtWidgets.QComboBox, QtWidgets.QLineEdit, QtWidgets.QPlainTextEdit)
         for widget in window.findChildren(QtWidgets.QWidget):
@@ -318,6 +319,21 @@ class MainWindowTest(unittest.TestCase):
                 name = widget.accessibleName() or getattr(widget, "text", lambda: "")()
                 self.assertTrue(name, f"{widget!r} has no accessible name or text")
                 self.assertNotEqual(widget.focusPolicy(), QtCore.Qt.FocusPolicy.NoFocus)
+
+    def test_long_texts_never_widen_the_window(self) -> None:
+        """Paths, versions and messages from outside must wrap or elide."""
+        window = self.make_window()
+        window.show()
+        _app.processEvents()
+        content = window.centralWidget()
+        for text in widths.LONG_TEXTS:
+            self.assertGreater(widths.fill_dynamic(content, text), 8)
+            for _ in range(3):
+                _app.processEvents()
+            self.assertLessEqual(
+                window.minimumSizeHint().width(), MAX_MIN_WIDTH,
+                "%d characters in every dynamic text widened the window\n%s"
+                % (len(text), widths.report(window)))
 
     # ---- window chrome ------------------------------------------------------
 

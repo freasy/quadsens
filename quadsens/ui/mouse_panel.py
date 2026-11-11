@@ -21,6 +21,7 @@ from .status import (
     SPACE_M,
     SPACE_S,
     Card,
+    ElideLabel,
     Disclosure,
     MessageLabel,
     StatusDot,
@@ -114,7 +115,7 @@ class MousePanel(Card):
         self.toggle_button.clicked.connect(self.toggle)
 
         self.dot = StatusDot()
-        self.status_label = QtWidgets.QLabel()
+        self.status_label = ElideLabel()
         self.status_label.setAccessibleName("Virtual mouse status")
         # A long status must not widen the window; the tooltip has it in full.
         self.status_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
@@ -148,7 +149,7 @@ class MousePanel(Card):
 
         # The log is protocol detail: hidden until asked for, summarised meanwhile.
         self.log_box = QtWidgets.QWidget()
-        self.summary_label = caption(QtWidgets.QLabel("No events yet."))
+        self.summary_label = caption(ElideLabel("No events yet."))
         self.summary_label.setAccessibleName("Last event of the virtual mouse")
         self.summary_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
                                          QtWidgets.QSizePolicy.Policy.Preferred)

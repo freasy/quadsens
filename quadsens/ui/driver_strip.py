@@ -6,7 +6,7 @@ import threading
 
 from .. import driver_setup as ds
 from .qt import QtCore, QtWidgets, Signal
-from .status import SPACE_M, SPACE_S, WrapLabel, caption
+from .status import SPACE_M, SPACE_S, ElideLabel, WrapLabel, caption
 from .theme import set_primary
 
 BANNERS = {ds.PASSED: "", ds.CHECKING: "", ds.FIXABLE: "error", ds.ATTENTION: "warning"}
@@ -97,10 +97,10 @@ class DriverCheckStrip(QtWidgets.QFrame):
         font.setWeight(font.Weight.DemiBold)
         self.headline.setFont(font)
         # In the passed state the detail sits beside the headline; otherwise below it.
-        self.side_detail = caption(QtWidgets.QLabel())
+        self.side_detail = caption(ElideLabel())
         self.side_detail.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
                                        QtWidgets.QSizePolicy.Policy.Preferred)
-        self.passed_headline = QtWidgets.QLabel()
+        self.passed_headline = ElideLabel()
         self.passed_headline.setFont(font)
         self.detail = caption(WrapLabel("Driver check detail"))
 

@@ -119,6 +119,62 @@ class StatusDot(QtWidgets.QWidget):
         painter.end()
 
 
+class ElideLabel(QtWidgets.QLabel):
+    """One-line label for text that is not known in advance (states, versions, paths).
+
+    It never raises the minimum width of the window: when there is not room
+    for the text it is shortened with an ellipsis (in the middle for paths),
+    and the tooltip then has it in full. text() and what a screen reader gets
+    stay the full text; only the painting is shortened.
+    """
+
+    MIN_CHARS = 6
+
+    def __init__(self, text: str = "", parent: QtWidgets.QWidget | None = None,
+                 mode: QtCore.Qt.TextElideMode = QtCore.Qt.TextElideMode.ElideRight) -> None:
+        super().__init__(text, parent)
+        self._mode = mode
+        self._tip = ""              # a tooltip given from outside wins over the full text
+        self._shows_full_text = False
+        self.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        policy = self.sizePolicy()
+        policy.setHorizontalPolicy(QtWidgets.QSizePolicy.Policy.Preferred)
+        self.setSizePolicy(policy)
+
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 (Qt name)
+        metrics = self.fontMetrics()
+        width = min(super().sizeHint().width(),
+                    metrics.horizontalAdvance("x" * self.MIN_CHARS))
+        return QtCore.QSize(width, super().minimumSizeHint().height())
+
+    def setToolTip(self, text: str) -> None:  # noqa: N802 (Qt name)
+        self._tip = text
+        super().setToolTip(text)
+
+    def is_elided(self) -> bool:
+        margins = self.contentsMargins()
+        room = self.width() - margins.left() - margins.right() - 2 * self.margin()
+        return self.fontMetrics().horizontalAdvance(self.text()) > room
+
+    def paintEvent(self, _event: QtGui.QPaintEvent) -> None:  # noqa: N802 (Qt name)
+        rect = self.contentsRect().adjusted(self.margin(), 0, -self.margin(), 0)
+        text = self.fontMetrics().elidedText(self.text(), self._mode, max(rect.width(), 0))
+        elided = text != self.text()
+        if not self._tip and elided != self._shows_full_text:
+            self._shows_full_text = elided
+            super().setToolTip(self.text() if elided else "")
+        painter = QtGui.QPainter(self)
+        self.style().drawItemText(painter, rect, int(self.alignment()), self.palette(),
+                                  self.isEnabled(), text, self.foregroundRole())
+        painter.end()
+
+    def setText(self, text: str) -> None:  # noqa: N802 (Qt name)
+        super().setText(text)
+        if self._shows_full_text:
+            super().setToolTip(text)
+        self.update()
+
+
 class WrapLabel(QtWidgets.QLabel):
     """Plain-text label that wraps, never widens its parent and is never cut off.
 
@@ -132,6 +188,7 @@ class WrapLabel(QtWidgets.QLabel):
     def __init__(self, accessible_name: str, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._needed = self.fontMetrics().height()
+        self._tip = ""              # a tooltip given from outside wins
         self.setAccessibleName(accessible_name)
         self.setWordWrap(True)
         self.setTextFormat(QtCore.Qt.TextFormat.PlainText)
@@ -169,6 +226,17 @@ class WrapLabel(QtWidgets.QLabel):
         if needed != self._needed:
             self._needed = needed
             self.updateGeometry()
+        # A word wider than the label (a long path) cannot wrap and is cut off:
+        # the tooltip then has the whole text.
+        if width > 0 and not self._tip:
+            words = self.text().split()
+            cut = any(self.fontMetrics().horizontalAdvance(word) > width for word in words)
+            if cut != bool(QtWidgets.QLabel.toolTip(self)):
+                QtWidgets.QLabel.setToolTip(self, self.text() if cut else "")
+
+    def setToolTip(self, text: str) -> None:  # noqa: N802 (Qt name)
+        self._tip = text
+        super().setToolTip(text)
 
 
 # Kinds of banner and the mark shown in front of the text, so that the kind

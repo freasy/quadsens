@@ -16,6 +16,7 @@ from .status import (
     SPACE_M,
     SPACE_S,
     Card,
+    ElideLabel,
     Disclosure,
     MessageLabel,
     WrapLabel,
@@ -87,7 +88,12 @@ class RawAccelPanel(Card):
         self.profile_combo.currentIndexChanged.connect(lambda *_: self._refresh())
         profile_label = QtWidgets.QLabel("&Profile:")
         profile_label.setBuddy(self.profile_combo)
-        self.version_label = caption(QtWidgets.QLabel())
+        # Names and versions come from the file: they may be long, and must not
+        # widen the window.
+        self.profile_combo.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.profile_combo.setMinimumContentsLength(8)
+        self.version_label = caption(ElideLabel())
         self.version_label.setAccessibleName("RawAccel settings version")
         profile_row = QtWidgets.QHBoxLayout()
         profile_row.setSpacing(SPACE_M)
@@ -147,7 +153,7 @@ class RawAccelPanel(Card):
         tables.addLayout(editor)
         tables.addLayout(preview, 1)
 
-        self.state_label = QtWidgets.QLabel()
+        self.state_label = ElideLabel()
         self.state_label.setAccessibleName("Whether the settings file holds the new values")
         self.note_label = caption(WrapLabel("How exact the result is"))
         self.boot_label = caption(WrapLabel("About restarting Windows"))
