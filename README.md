@@ -73,6 +73,9 @@ The binary bundles Python and Qt but still needs a glibc at least as new as
 the one it was built with (see the release notes). If it does not start on
 your distribution, build it yourself, which takes one command.
 
+The same page has `quadsens.exe` for Windows; see
+[Windows (preview)](#windows-preview).
+
 The one-time setup below needs two files from this repository
 (`99-quadsens.rules` and, optionally, `helper/quadsens-apply`), so clone it or
 download those files as well.
@@ -601,11 +604,14 @@ remove it by hand: *Task Manager > Startup apps*, or delete the value with
 verified on Linux only. If up and down feel swapped after applying, tick
 *Flip up/down* under *Advanced* and apply again.
 
-**Getting the program.** There is no released Windows build yet. Build it
-with `powershell -ExecutionPolicy Bypass -File build-windows.ps1` (needs
-Python 3.10 or newer), which writes `dist\quadsens.exe`. The executable is not
-signed, so Windows SmartScreen will warn about an unknown publisher the first
-time; that is expected for an unsigned program.
+**Getting the program.** Download `quadsens.exe` (Windows 10/11, x64) from
+the [Releases page](https://github.com/freasy/quadsens/releases); the release
+notes list its SHA-256 checksum. It is a single file and needs no
+installation. To build it yourself instead, run
+`powershell -ExecutionPolicy Bypass -File build-windows.ps1` (needs Python
+3.10 or newer), which writes `dist\quadsens.exe`. Either way the executable is
+not signed, so Windows SmartScreen will warn about an unknown publisher the
+first time; that is expected for an unsigned program.
 
 ## Editing the acceleration
 
