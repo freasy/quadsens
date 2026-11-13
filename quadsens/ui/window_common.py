@@ -10,6 +10,7 @@ from .. import about
 from ..diagram import DEFAULT_ZOOM, ZOOMS, number, zoom_of
 from .qt import QtCore, QtGui, QtWidgets
 from .theme import MODE_TITLES, MODES, ThemeManager, env_mode
+from .update_bar import UpdateNotice
 
 
 def about_html() -> str:
@@ -34,7 +35,7 @@ def fit_to_screen(window: QtWidgets.QWidget, width: int, height: int) -> None:
         width, height = min(width, room.width()), min(height, room.height() - 40)
     window.resize(width, height)
 
-class WindowCommon:
+class WindowCommon(UpdateNotice):
     """Mixin for a QMainWindow with ``_settings``, ``theme`` and a ``calibration_panel``."""
 
     _settings: QtCore.QSettings

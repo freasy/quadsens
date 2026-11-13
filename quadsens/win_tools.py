@@ -50,12 +50,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from .github import API_HOST, parse_version  # noqa: F401 (re-exported)
+
 USBIP, RAWACCEL = "usbip-win2", "rawaccel"
 # The download starts at github.com and is redirected once, to the host that
 # serves release files (seen in our own downloads of both pins). No other host
 # is followed.
 DOWNLOAD_HOSTS = ("github.com", "release-assets.githubusercontent.com")
-API_HOST = "api.github.com"
 
 
 @dataclass(frozen=True)
@@ -153,19 +154,6 @@ HOW_TO_REMOVE = (
     "rights), restart the computer, then delete the folder.",
     "QuadSens does not remove either of them.",
 )
-
-
-def parse_version(text: str) -> tuple[int, ...] | None:
-    """The numbers of a version or release tag ("v.0.9.8.1", "1.7.1"), None if there are none."""
-    # Numbers with dots first ("usbip-win2 0.9.8.1" must not give 2); a lone
-    # number only when the text holds no other.
-    match = re.search(r"\d+(?:\.\d+)+", text or "") \
-        or re.fullmatch(r"\D*(\d+)\D*", text or "")
-    if not match:
-        return None
-    if match.re.groups:
-        return (int(match.group(1)),)
-    return tuple(int(part) for part in match.group(0).split("."))
 
 
 OLDER, SAME, NEWER, UNKNOWN = "older", "same", "newer", "unknown"

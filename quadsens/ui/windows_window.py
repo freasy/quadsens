@@ -20,7 +20,9 @@ from collections.abc import Callable, Mapping
 
 from .. import (
     about,
+    platforms,
     rawaccel_live,
+    update_check,
     usbip_client,
     win_autostart,
     win_download,
@@ -72,10 +74,11 @@ FIRST_STEPS_WINDOWS: tuple[str, ...] = (
     "Check the table (current and new RawAccel settings) and press Apply.",
 )
 ONLINE_NOTE = (
-    "When it starts, and on Check again, QuadSens asks api.github.com for the newest "
-    "release of usbip-win2 and of RawAccel, to tell you when one is newer than the "
+    "When it starts, QuadSens asks api.github.com for the newest release of QuadSens, "
+    "and, then and on Check again, for the newest release of usbip-win2 and of "
+    "RawAccel, to tell you when there is a newer QuadSens or a tool newer than the "
     "version it was tested with. Nothing else is sent and nothing is downloaded by "
-    "that. Help > Check for newer tool versions online switches it off. Files are "
+    "that. Help > Check for newer versions online switches it off. Files are "
     "downloaded from github.com only when you start an installation.")
 ACCEL_HINT = ("The acceleration curve of RawAccel is edited in the Acceleration card at "
               "the bottom of the window (View > Acceleration… jumps there). Set it before "
@@ -96,9 +99,12 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
                  | None = win_download.latest_release,
                  read_live: Callable[[], rawaccel_live.Live] = rawaccel_live.read_driver,
                  registry: win_autostart.Registry | None = None,
-                 started: Callable[[], float | None] = win_install.boot_time) -> None:
+                 started: Callable[[], float | None] = win_install.boot_time,
+                 check_update: Callable[[], update_check.Result] | None = None) -> None:
         super().__init__(parent)
         self._settings = settings
+        self.init_update_notice(check_update, os.environ if environ is None else environ,
+                                platforms.WINDOWS)
         self._calibration_glob = calibration_glob
         self.info_box: QtWidgets.QMessageBox | None = None
         # Replaceable, so that tests do not start a file manager.
@@ -152,6 +158,7 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(central)
         layout.setContentsMargins(SPACE_L, SPACE_M - 2, SPACE_L, SPACE_M - 2)
         layout.setSpacing(SPACE_M - 2)
+        layout.addWidget(self.update_bar)
         layout.addWidget(self.usbip_strip)
         layout.addWidget(self.steps_bar)
         layout.addWidget(self.mouse_panel)
@@ -188,6 +195,7 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
 
         panel = self.rawaccel_panel
         order: list[QtWidgets.QWidget] = [
+            self.update_bar.open_button, self.update_bar.skip_button,
             *self.tools_strip.buttons(),
             self.steps_bar.next_button,
             self.mouse_panel.toggle_button, self.mouse_panel.pid_combo,
@@ -208,6 +216,7 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
 
         self.update_steps()
         self.check_online()
+        self.check_for_update()
         self.steps_bar.next_button.setFocus()
         fit_to_screen(self, *DEFAULT_SIZE)
         geometry = settings.value("window/geometry")
@@ -243,12 +252,9 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
         self.setup_help_action = QtGui.QAction("&Setup help", self)
         self.setup_help_action.triggered.connect(self.show_setup_help)
         help_menu.addAction(self.setup_help_action)
-        self.online_action = QtGui.QAction("Check for newer tool versions &online", self)
-        self.online_action.setCheckable(True)
-        self.online_action.setChecked(self.online_check_enabled())
-        self.online_action.setToolTip(ONLINE_NOTE)
-        self.online_action.toggled.connect(self.set_online_check)
-        help_menu.addAction(self.online_action)
+        help_menu.addSeparator()
+        self.add_update_action(help_menu)
+        self.add_online_switch(help_menu, ONLINE_NOTE)
         help_menu.addSeparator()
         self.about_action = QtGui.QAction("&About %s" % about.APP_NAME, self)
         self.about_action.setMenuRole(QtGui.QAction.MenuRole.AboutRole)
@@ -345,12 +351,12 @@ class WindowsMainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
         self.tools_strip.check()
 
     def online_check_enabled(self) -> bool:
-        if self._environ.get("QUADSENS_NO_ONLINE_CHECK"):
-            return False
-        return bool(self._settings.value("tools/online_check", True, type=bool))
+        # The tests change _environ after the window was made.
+        self._update_environ = self._environ
+        return super().online_check_enabled()
 
     def set_online_check(self, enabled: bool) -> None:
-        self._settings.setValue("tools/online_check", enabled)
+        super().set_online_check(enabled)
         if enabled:
             self.check_online()
         else:

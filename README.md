@@ -266,6 +266,36 @@ PROTON_ENABLE_HIDRAW=0x1B1C/0x2B43 %command%
 `0x2B43` is the default product ID in QuadSens. If you choose another one in
 the *Product ID* box, use the same value here.
 
+## Newer versions of QuadSens
+
+**Status:** the request itself was tried against GitHub from a source
+checkout on one Linux machine. The notice has not yet been seen in a released
+binary on either system, because no release newer than the one that
+introduces it exists.
+
+When it starts, QuadSens asks `api.github.com` once, in the background, for
+the newest release of QuadSens. If that release is newer than the running
+version, a line on top of the window says so ("QuadSens 0.5.0 is available.
+You have 0.4.1."), on Linux and on Windows alike.
+
+- *Open release page* opens the page of that release in your browser.
+  QuadSens does not download, install or restart anything: get the new file
+  there and put it in place of the old one.
+- *Skip this version* hides the line until a release newer than that one
+  appears.
+- *Help > Check for updates now* asks on request and always answers: with the
+  line, with "You have the newest version", or with the reason why it could
+  not look.
+- **What goes online:** that one request. It carries nothing about you or
+  your computer beyond what any request to a web server carries. Pre-releases
+  are ignored, and the link is built by QuadSens from the version number, not
+  taken from the answer. A check that fails (no network, GitHub not
+  reachable) is silent unless you asked for it.
+- **Switching it off:** untick *Help > Check for newer versions online*, or
+  set the environment variable `QUADSENS_NO_ONLINE_CHECK=1`. On Windows the
+  same switch also covers the question about newer tool versions. *Check for
+  updates now* still works when it is off, because you asked.
+
 ## Usage
 
 Below the driver check, a row shows six steps. A done step has a check mark,
@@ -451,8 +481,9 @@ What the buttons do, always after a dialog that says so and waits for you:
   `api.github.com` for the newest release of both projects and shows a quiet
   line with a link if one is newer than the tested version. It does not
   download or install versions it was not tested with. Nothing else is sent,
-  and there is no other telemetry. *Help > Check for newer tool versions
-  online* switches it off, as does the environment variable
+  and there is no telemetry; the only other request is the one for a newer
+  QuadSens (see [Newer versions of QuadSens](#newer-versions-of-quadsens)).
+  *Help > Check for newer versions online* switches both off, as does the environment variable
   `QUADSENS_NO_ONLINE_CHECK=1`. Without a network nothing happens and nothing
   is reported.
 - An installed version that differs from the tested one is shown as
@@ -855,6 +886,8 @@ quadsens/              application package
   usbip_mouse.py       server plus attach as one thing with states (no Qt)
   win_tools.py         the pinned releases of usbip-win2 and RawAccel (no Qt)
   win_download.py      fetch a pinned file and check it (no Qt)
+  github.py            HTTPS requests to GitHub, newest release of a project (no Qt)
+  update_check.py      is there a newer QuadSens, and the texts about it (no Qt)
   win_install.py       unpack, check and start the installers (no Qt)
   win_autostart.py     the opt-in startup entry for RawAccel's writer (no Qt)
   rawaccel_live.py     read RawAccel's driver state, read-only (no Qt)

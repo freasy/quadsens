@@ -1023,6 +1023,24 @@ class ToolsTest(WindowCase):
         self.assertFalse(again.online_action.isChecked())
         self.assertEqual(asked, [])
 
+    def test_newer_quadsens_is_a_line_on_top(self) -> None:
+        from quadsens import update_check
+        window = self.make()
+        self.assertIsNone(window._update_check)          # tests never ask the network
+        self.assertTrue(window.update_bar.isHidden())
+        url = "https://github.com/freasy/quadsens/releases/tag/v9.0.0"
+        window._update_check = lambda: update_check.Result(update_check.NEWER, "9.0.0", url)
+        window.update_action.trigger()
+        window._update_thread.join(30)
+        window._take_update_results()
+        self.assertFalse(window.update_bar.isHidden())
+        self.assertIn("quadsens.exe", window.update_bar.detail.text())
+        window.update_bar.open_button.click()
+        self.assertEqual(window.opened, [url])
+        window.online_action.setChecked(False)           # the one switch covers it too
+        self.assertTrue(window.update_bar.isHidden())
+        self.assertFalse(window.check_for_update())
+
     def test_offline_or_failing_check_is_silent(self) -> None:
         def broken(pin: win_tools.Pin):
             if pin.key == USBIP:
@@ -1531,7 +1549,7 @@ class ImportCleanlinessTest(unittest.TestCase):
         linux = self.loaded("from quadsens.ui.main_window import MainWindow", "linux")
         self.assertIn("quadsens.emulator", linux)
         self.assertNotIn("quadsens.ui.rawaccel_panel", linux)
-        # Linux never fetches or installs anything: that code is not even loaded.
+        # Linux never downloads or installs anything: that code is not even loaded.
         for name in ("quadsens.win_tools", "quadsens.win_download", "quadsens.win_install",
                      "quadsens.ui.install_dialog", "quadsens.ui.tools_strip"):
             self.assertNotIn(name, linux)

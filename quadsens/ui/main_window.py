@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import html
+import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from .. import about
-from .. import driver_setup
+from .. import driver_setup, platforms, update_check
 from ..driver import Driver
 from ..emulator import (
     DEFAULT_PRODUCT_ID,
@@ -38,6 +39,7 @@ from .setup_dialog import DriverSetupDialog
 from .status import SPACE_L, SPACE_M
 from .steps_bar import StepsBar
 from .theme import ThemeManager, set_primary, stored_mode
+from .update_bar import UPDATE_NOTE
 from .values_io import ValuesIO
 from .window_common import WindowCommon, about_html, fit_to_screen  # noqa: F401 (about_html re-exported)
 
@@ -51,9 +53,13 @@ class MainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
                  emulator_state_path: str | None = None,
                  parent: QtWidgets.QWidget | None = None,
                  uhid_path: str = UHID_PATH, saver: Saver | None = None,
-                 setup_probe: driver_setup.Probe | None = None) -> None:
+                 setup_probe: driver_setup.Probe | None = None,
+                 check_update: Callable[[], update_check.Result] | None = None,
+                 environ: Mapping[str, str] | None = None) -> None:
         super().__init__(parent)
         self._settings = settings
+        self.init_update_notice(check_update, os.environ if environ is None else environ,
+                                platforms.LINUX)
         self._calibration_glob = calibration_glob
         self._driver = driver
         # A result counts as new when it is younger than this: the moment the
@@ -94,6 +100,7 @@ class MainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
         self._layout = layout = QtWidgets.QVBoxLayout(central)
         layout.setContentsMargins(SPACE_L, SPACE_M - 2, SPACE_L, SPACE_M - 2)
         layout.setSpacing(SPACE_M - 2)
+        layout.addWidget(self.update_bar)
         layout.addWidget(self.driver_strip)
         layout.addWidget(self.steps_bar)
         layout.addWidget(self.mouse_panel)
@@ -131,6 +138,7 @@ class MainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
 
         # Keyboard order follows the workflow: next step, mouse, result, driver.
         order: list[QtWidgets.QWidget] = [
+            self.update_bar.open_button, self.update_bar.skip_button,
             self.driver_strip.action_button, self.driver_strip.details_button,
             self.driver_strip.recheck_button,
             self.steps_bar.next_button,
@@ -157,6 +165,7 @@ class MainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
         self._share_space(self.mouse_panel.log_shown())
         self.update_steps()
         self.check_driver()
+        self.check_for_update()
         fit_to_screen(self, *DEFAULT_SIZE)
         geometry = settings.value("window/geometry")
         if isinstance(geometry, QtCore.QByteArray) and not geometry.isEmpty():
@@ -202,6 +211,9 @@ class MainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
         self.driver_setup_action.triggered.connect(lambda: self.show_driver_setup())
         help_menu.addAction(self.driver_setup_action)
         help_menu.addSeparator()
+        self.add_update_action(help_menu)
+        self.add_online_switch(help_menu, UPDATE_NOTE)
+        help_menu.addSeparator()
         self.about_action = QtGui.QAction("&About %s" % about.APP_NAME, self)
         self.about_action.setMenuRole(QtGui.QAction.MenuRole.AboutRole)
         self.about_action.triggered.connect(self.show_about)
@@ -217,6 +229,10 @@ class MainWindow(WindowCommon, ValuesIO, QtWidgets.QMainWindow):
         self._open_box("First steps", "<h3>First steps</h3><ol>%s</ol><p>%s</p>" % (
             "".join("<li>%s</li>" % html.escape(step) for step in FIRST_STEPS),
             html.escape(PERSIST) + "</p><p>" + html.escape(ACCEL_HINT)))
+
+    def show_about(self) -> None:
+        self._open_box("About %s" % about.APP_NAME,
+                       about_html() + "<p>%s</p>" % html.escape(UPDATE_NOTE))
 
     def setup_problems(self) -> list[str]:
         """Everything that is not set up yet, each with what to do about it."""

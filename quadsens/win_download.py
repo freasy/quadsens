@@ -23,23 +23,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Protocol
 
-from .win_tools import API_HOST, DOWNLOAD_HOSTS, Pin
+from .github import (  # noqa: F401 (re-exported: the names the callers know)
+    CANCELLED, DISK, HASH, HOST, MAX_REDIRECTS, NETWORK, SIZE, API_TIMEOUT, DownloadError,
+    Latest,
+    Transport, _open, check_url, fetch_latest, http_transport,
+)
+from .win_tools import DOWNLOAD_HOSTS, Pin
 
 CHUNK = 64 * 1024
 TIMEOUT = 30.0               # seconds without any data, per connection
-API_TIMEOUT = 6.0            # the version check must not keep anything waiting
-MAX_REDIRECTS = 4
-USER_AGENT = "QuadSens"      # GitHub's API refuses requests without one
-
-# Kinds of failure; the texts are for the user, the kinds for the program.
-NETWORK, HOST, SIZE, HASH, CANCELLED, DISK = (
-    "network", "host", "size", "hash", "cancelled", "disk")
-
-
-class DownloadError(Exception):
-    def __init__(self, kind: str, message: str) -> None:
-        super().__init__(message)
-        self.kind = kind
 
 
 class Response(Protocol):
@@ -50,67 +42,7 @@ class Response(Protocol):
     def close(self) -> None: ...
 
 
-Transport = Callable[[str, float], Any]
 Progress = Callable[[int, int], None]
-
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Redirects are followed by our own code, which checks where they lead."""
-
-    def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
-        return None
-
-
-def http_transport(url: str, timeout: float) -> Any:
-    """One HTTPS request without following redirects.
-
-    Proxy settings and certificates are those of the system, as the standard
-    library finds them.
-    """
-    opener = urllib.request.build_opener(_NoRedirect())
-    request = urllib.request.Request(url, headers={
-        "User-Agent": USER_AGENT, "Accept": "application/octet-stream, application/json"})
-    try:
-        return opener.open(request, timeout=timeout)
-    except urllib.error.HTTPError as response:      # 3xx and errors arrive this way
-        return response
-
-
-def check_url(url: str, hosts: tuple[str, ...]) -> None:
-    """Refuse anything but HTTPS to one of ``hosts`` (no port, no user name)."""
-    parts = urllib.parse.urlsplit(url)
-    host = (parts.hostname or "").lower()
-    if parts.scheme != "https" or host not in hosts or parts.port not in (None, 443) \
-            or parts.username is not None or parts.password is not None:
-        raise DownloadError(HOST, "The download was sent to an address QuadSens does not "
-                                  "accept (%s). Nothing was downloaded."
-                            % (parts.scheme + "://" + host if host else "an unreadable one"))
-
-
-def _open(url: str, hosts: tuple[str, ...], transport: Transport, timeout: float) -> Any:
-    """Open ``url``, following redirects only within ``hosts``."""
-    for _ in range(MAX_REDIRECTS + 1):
-        check_url(url, hosts)
-        try:
-            response = transport(url, timeout)
-        except DownloadError:
-            raise
-        except TimeoutError as exc:
-            raise DownloadError(NETWORK, "The server did not answer in time.") from exc
-        except (OSError, ValueError) as exc:
-            raise DownloadError(NETWORK, "The download failed: %s."
-                                % (getattr(exc, "reason", None) or exc)) from exc
-        status = int(getattr(response, "status", 0) or 0)
-        if status in (301, 302, 303, 307, 308):
-            target = response.headers.get("Location", "")
-            response.close()
-            url = urllib.parse.urljoin(url, target)
-            continue
-        if status != 200:
-            response.close()
-            raise DownloadError(NETWORK, "The server answered with status %d." % status)
-        return response
-    raise DownloadError(NETWORK, "The download was redirected too many times.")
 
 
 def cache_dir(environ: Mapping[str, str] | None = None) -> Path:
@@ -228,33 +160,14 @@ def download(pin: Pin, folder: str | os.PathLike[str],
             pass
 
 
-@dataclass(frozen=True)
-class Latest:
-    tag: str
-    url: str
-
-
 def latest_release(pin: Pin, transport: Transport = http_transport,
                    timeout: float = API_TIMEOUT) -> Latest | None:
     """The newest release of the project of ``pin``, None if that cannot be learned.
 
-    This is the one request QuadSens makes without being asked (it can be
-    switched off). It sends nothing but the request itself. Any failure is
-    silence: the answer is only ever a notice.
+    This is a request QuadSens makes without being asked (it can be switched
+    off). Any failure is silence: the answer is only ever a notice.
     """
     try:
-        response = _open(pin.latest_api_url, (API_HOST,), transport, timeout)
-        try:
-            data = json.loads(response.read(512 * 1024).decode("utf-8", "replace"))
-        finally:
-            response.close()
-    except (DownloadError, OSError, ValueError):
+        return fetch_latest(pin.repo, transport, timeout)
+    except DownloadError:
         return None
-    if not isinstance(data, dict) or data.get("prerelease") or data.get("draft"):
-        return None
-    tag = data.get("tag_name")
-    if not isinstance(tag, str) or not tag or len(tag) > 64:
-        return None
-    # The link shown to the user is built here, not taken from the answer.
-    return Latest(tag, "https://github.com/%s/releases/tag/%s"
-                  % (pin.repo, urllib.parse.quote(tag, safe=".-_")))

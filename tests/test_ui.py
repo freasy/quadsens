@@ -1189,13 +1189,40 @@ class MainWindowTest(unittest.TestCase):
         self.assertEqual(opened, ["setup"])
         self.assertEqual(len(bar.chips), 6)   # the stepper did not get longer
 
+    def test_update_notice_in_the_window(self) -> None:
+        from quadsens import update_check
+        window = self.make_window()
+        self.assertIsNone(window._update_check)          # tests never ask the network
+        self.assertEqual([window.update_action.text(), window.online_action.text()],
+                         ["Check for &updates now", "Check for newer versions &online"])
+        self.assertTrue(window.online_action.isChecked())
+        url = "https://github.com/freasy/quadsens/releases/tag/v9.0.0"
+        window._update_check = lambda: update_check.Result(update_check.NEWER, "9.0.0", url)
+        window.show()
+        window.update_action.trigger()
+        window._update_thread.join(30)
+        window._take_update_results()
+        self.assertTrue(window.update_bar.isVisible())
+        self.assertIn("9.0.0", window.update_bar.headline.text())
+        widths.assert_fits(self, window.minimumSizeHint(), widths.LINUX_FIT, window)
+        opened: list[str] = []
+        window.open_url = lambda link: opened.append(link.toString())
+        window.update_bar.open_button.click()
+        self.assertEqual(opened, [url])
+        window.online_action.setChecked(False)
+        self.assertTrue(window.update_bar.isHidden())
+        window.about_action.trigger()
+        assert window.info_box is not None
+        self.assertIn("api.github.com", window.info_box.text())
+        window.info_box.close()
+
     def test_primary_button_has_a_shortcut_and_names(self) -> None:
         window = self.make_window()
         button = window.steps_bar.next_button
         self.assertEqual(button.shortcut().toString(), "Ctrl+Return")
         self.assertEqual(button.accessibleName(), "Next step: Start virtual mouse")
         self.assertTrue(button.font().bold())
-        self.assertIn(button, window.tab_order[:4])
+        self.assertIn(button, window.tab_order[:6])   # after the update notice and the strip
 
     # ---- save to config -----------------------------------------------------
 
@@ -1787,7 +1814,11 @@ class MainWindowTest(unittest.TestCase):
         self.assertTrue(strip.recheck_button.isVisible())
         widths.assert_fits(self, strip.size(), (None, 30), strip)   # one line of controls
         self.assertTrue(window.steps_bar.next_button.isVisible())
-        self.assertIs(window.scroll.widget().layout().itemAt(0).widget(), strip)
+        # Above it only the notice about a newer version, hidden until there is one.
+        page = window.scroll.widget().layout()
+        self.assertIs(page.itemAt(0).widget(), window.update_bar)
+        self.assertTrue(window.update_bar.isHidden())
+        self.assertIs(page.itemAt(1).widget(), strip)
         opened: list[str] = []
         window.show_driver_setup = lambda focus="": opened.append(focus)  # type: ignore
         strip.action_requested.disconnect()
